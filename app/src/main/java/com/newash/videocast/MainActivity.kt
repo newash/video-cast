@@ -190,7 +190,7 @@ private class SearchDialog(
         message.text = search.message.orEmpty()
         adapter.run {
             clear()
-            addAll(search.results.map { "[${it.language}] ${it.name}" })
+            addAll(search.results.map { "[${it.language}] ⇩${it.downloads}  ${it.name}" })
         }
     }
 

@@ -70,6 +70,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var searchJob: Job? = null
 
     init {
+        App.consumeLastCrash(app)?.let { crash ->
+            _state.update {
+                it.copy(status = "Previous crash:\n" + crash.lineSequence().take(5).joinToString("\n"))
+            }
+        }
         // The Cast SDK requires main-thread access; poll instead of juggling
         // per-session progress listeners. Skip the work while nothing collects
         // (screen off / app backgrounded).

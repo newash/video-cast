@@ -19,7 +19,7 @@ import java.net.URLEncoder
  */
 class OpenSubtitlesClient(private val apiKey: String) {
 
-    data class Result(val fileId: Long, val name: String, val language: String)
+    data class Result(val fileId: Long, val name: String, val language: String, val downloads: Long)
 
     suspend fun search(query: String, languages: String): List<Result> = withContext(Dispatchers.IO) {
         // The API requires query params lowercase and alphabetically sorted
@@ -85,6 +85,7 @@ class OpenSubtitlesClient(private val apiKey: String) {
             fileId = file.optLong("file_id", -1).takeIf { it >= 0 } ?: return@mapNotNull null,
             name = file.str("file_name").ifBlank { attributes.str("release").ifBlank { "subtitle" } },
             language = attributes.str("language").ifBlank { "?" },
+            downloads = attributes.optLong("download_count", 0),
         )
     }
 
