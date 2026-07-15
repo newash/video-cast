@@ -10,7 +10,7 @@ milestone build plan.
 ## What it does
 
 - Pick a local video (Storage Access Framework), serve it from an embedded
-  HTTP server (NanoHTTPD, with Range/206 for seeking), and cast it via the
+  HTTP server (JLHTTP, with Range/206 for seeking), and cast it via the
   Google Cast sender SDK to the default receiver.
 - Subtitles: pick a local SRT/ASS file, or search OpenSubtitles by title
   (anonymous downloads). Everything is converted to WebVTT and served with
@@ -45,7 +45,7 @@ Everything else works without it.
 ## Testing
 
 ```
-./gradlew test          # subtitle conversion + HTTP range unit tests
+./gradlew test          # subtitle conversion + JLHTTP range/CORS contract tests
 ```
 
 On-device verification of the server (milestone M2 in ARCHITECTURE.md):

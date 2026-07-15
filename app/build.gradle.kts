@@ -41,7 +41,7 @@ dependencies {
     implementation("androidx.mediarouter:mediarouter:1.7.0")
     implementation("com.google.android.gms:play-services-cast-framework:21.5.0")
 
-    implementation("org.nanohttpd:nanohttpd:2.3.1")
+    implementation("net.freeutils:jlhttp:3.2")
     implementation("com.github.albfernandez:juniversalchardet:2.5.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 

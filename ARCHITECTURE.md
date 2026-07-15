@@ -32,7 +32,7 @@ three alive and controllable.
 │   └─ transport controls ────────────► CastPlayer ────────────────┼──► Cast SDK
 │                                          │  load(MediaInfo +     │    (session,
 │  StreamingService (foreground)           │   MediaTrack[VTT])    │     RemoteMediaClient,
-│   └─ owns MediaServer (NanoHTTPD)        │                       │     media notification)
+│   └─ owns MediaServer (JLHTTP)          │                       │     media notification)
 │        GET /video      ◄─────────────────┼───────────────────────┼──◄ Chromecast fetches
 │        GET /subs.vtt   ◄─────────────────┘                       │    Range + CORS
 │                                                                  │
@@ -51,8 +51,7 @@ com.newash.videocast
 ├── MainViewModel.kt           single immutable UiState in a StateFlow (UDF)
 ├── CastOptionsProvider.kt     default receiver ID + notification options
 ├── cast/CastPlayer.kt         session mgmt, load w/ tracks, play/pause/seek
-├── server/HttpRange.kt        pure Range-header resolution (unit tested)
-├── server/MediaServer.kt      NanoHTTPD: /video (Range/206), /subs.vtt (CORS)
+├── server/MediaServer.kt      JLHTTP: /video (Range/206), /subs.vtt (CORS)
 ├── server/ServerHolder.kt     process-wide server lifecycle + port fallback
 ├── server/StreamingService.kt foreground service; wifi + wake locks
 ├── subs/SubtitleConverter.kt  SRT/ASS/VTT detection + conversion (unit tested)
@@ -67,55 +66,53 @@ com.newash.videocast
 | Language / style | Kotlin, functional-leaning: single immutable `UiState`, `val`s, extensions, pure functions (I/O and server internals stay pragmatically imperative) | Compact, testable; the UI is a dumb function of state. |
 | UI | Classic Views, one XML layout of system-default widgets; unicode glyphs (▶ ⏸ ⏪ ⏩ ✕) and vector drawables only | No Compose: saves megabytes of dependencies for a one-screen app. No styling for styling's sake, no bitmaps. Activity extends `AppCompatActivity` because the MediaRouter cast dialog requires an AppCompat theme. |
 | Cast | `play-services-cast-framework` (Cast v3 sender) + default media receiver (`CC1AD845`) | The framework handles discovery, session lifecycle, the media notification, and lock-screen controls for free — that's the "Cast notification" requirement done by configuration, not code. No custom receiver to host or register. |
-| HTTP server | **NanoHTTPD 2.3.1** | See justification below. |
+| HTTP server | **JLHTTP 3.2** | See justification below. |
 | HTTP client / JSON | `HttpURLConnection` + Android's built-in `org.json` | Two REST endpoints don't justify OkHttp + a serialization library (~2 MB of APK). |
 | File access | Storage Access Framework (`ACTION_OPEN_DOCUMENT`) | No storage permissions needed on any Android version; content URIs work on scoped storage. |
 | DI / architecture framework | None | Personal app, one screen. Manual wiring in the ViewModel. |
 
-Total third-party dependency surface: NanoHTTPD (~50 KB) and
+Total third-party dependency surface: JLHTTP (~59 KB) and
 juniversalchardet (~250 KB, subtitle charset detection) plus the unavoidable
 androidx/Cast libraries.
 
-### Why NanoHTTPD (the server justification)
+### Why JLHTTP (the server justification)
 
 Candidates considered:
 
-- **NanoHTTPD** — one ~50 KB dependency, zero transitive deps, plain
-  blocking sockets, a single `serve()` override. Range/206 and CORS must be
-  implemented by hand, but that is ~40 lines and — crucially — we *want*
-  hand control over exactly those headers, because they are the two known
-  failure points (seek and silent subtitle drop). Used by countless cast/DLNA
-  apps for exactly this job. Downside: dormant upstream since 2020 —
-  acceptable for a LAN-only server embedded in a personal app; there is no
-  hostile-input surface beyond our own Chromecast.
+- **JLHTTP** (`net.freeutils:jlhttp`, the choice) — a single-source-file,
+  ~59 KB, zero-dependency, actively maintained, RFC 9110/9112-conformant
+  embedded server on plain blocking sockets. Crucially for this app it has
+  *native* Range support: `Request.getRange()` parses (and RFC-correctly
+  ignores invalid) Range headers, and `Response.sendHeaders(..., range)`
+  emits 206/`Content-Range` — the classic Chromecast-seek failure points are
+  library code, not ours. HEAD and OPTIONS are handled per spec. Our code is
+  two small context handlers: CORS headers (the silent-subtitle-drop
+  failure point) plus a stream pre-skip with a read fallback, because some
+  `DocumentsProvider` streams refuse `skip()`, which JLHTTP's own range
+  skipping relies on. A JVM contract test (`JlhttpContractTest`) pins the
+  range/CORS/HEAD semantics over real HTTP.
+- **NanoHTTPD** — the traditional choice (and this project's original one):
+  same weight class, but abandoned since 2016 with an unpatched CVE, no
+  built-in ranges (we hand-rolled them), and quirks like sending full bodies
+  for HEAD. Swapped out once JLHTTP proved a strict superset; done before
+  first on-device testing so the substrate is only verified once.
+- **microhttp** — modern and tiny, but buffers response bodies fully in
+  memory: disqualifying for multi-GB video.
 - **Ktor (CIO engine)** — modern and maintained, and `PartialContent` +
-  `CORS` plugins do the hard parts. But it pulls in a large dependency tree
-  (Ktor core, engine, coroutines wiring), slows builds, grows the APK by
-  megabytes, and its plugin abstractions get in the way when you need to
-  debug why a Chromecast rejected a specific byte-range response. Overkill
-  for two routes.
-- **Jetty / AndroidServer / http4k** — heavier still, or unmaintained on
-  Android, or not designed for embedding in an app process.
-
-Serving two fixed routes to a single well-behaved client on a LAN is the
-minimal-server use case; NanoHTTPD is the minimal server. If upstream
-dormancy ever bites, the designated successor is **JLHTTP**
-(`net.freeutils:jlhttp`) — the one maintained, RFC 9110-conformant,
-single-file (~65 KB), Android-compatible equivalent. Our exposure is ~30
-lines (`serve()` override + response construction); the tested `HttpRange`
-resolver, CORS headers, and ContentResolver stream plumbing carry over
-unchanged. Deliberately deferred until after the app has proven itself
-against a real Chromecast, to avoid debugging two unknowns at once.
+  `CORS` plugins do the hard parts. But it pulls in a large dependency tree,
+  slows builds, grows the APK by megabytes, and its plugin abstractions get
+  in the way when debugging why a Chromecast rejected a specific byte-range
+  response. Overkill for two routes.
+- **Jetty / Netty / Undertow / AndroidServer / http4k** — heavier still,
+  unmaintained on Android, or not designed for embedding in an app process.
 
 ### Serving details that make or break casting
 
-- **Range/206** (`/video`): `HttpRange.resolve()` (pure, unit-tested) maps a
-  `Range: bytes=…` header to 200/206/416; 206 responses carry
-  `Content-Range`, `Accept-Ranges: bytes`, and a stream bounded to the
-  requested window. Each request opens a fresh `ContentResolver` stream and
-  skips to the offset — Chromecast issues a new range request on every seek,
-  and open-skip is the only approach that works across all
-  `DocumentsProvider`s.
+- **Range/206** (`/video`): parsing and 206/`Content-Range`/416 emission are
+  JLHTTP's (RFC 9110); we add `Accept-Ranges: bytes` and open a fresh
+  `ContentResolver` stream per request, pre-skipped to the offset with a
+  read fallback — Chromecast issues a new range request on every seek, and
+  open-skip is the only approach that works across all `DocumentsProvider`s.
 - **CORS** (`/subs.vtt` — and harmlessly on everything): the default
   receiver's player fetches text tracks with CORS enforced;
   `Access-Control-Allow-Origin: *` (plus `OPTIONS` preflight handling) or
@@ -152,7 +149,7 @@ against a real Chromecast, to avoid debugging two unknowns at once.
 ### Surviving screen-off
 
 `StreamingService` is a foreground service (`mediaPlayback` type) that owns
-the NanoHTTPD instance, holds a `WifiLock` (`FULL_HIGH_PERF`) and a partial
+the JLHTTP instance, holds a `WifiLock` (`FULL_HIGH_PERF`) and a partial
 wake lock while a session is active, and shows a minimal persistent
 notification. The Cast framework's own `MediaNotificationService` (enabled
 via `CastOptionsProvider`) provides the rich media notification with
@@ -184,7 +181,7 @@ workflow in place.
 
 **M2 — File picking + HTTP server with Range.**
 SAF video picker; `StreamingService` + `MediaServer` serving `/video`.
-✔ Verify: unit tests for `HttpRange`; then pick a file on the phone and,
+✔ Verify: the `JlhttpContractTest` range/CORS/HEAD contract tests; then pick a file on the phone and,
 from a laptop on the same LAN:
 `curl -sI http://<phone>:8394/video` shows `Accept-Ranges: bytes`;
 `curl -s -H "Range: bytes=100-199" -o /dev/null -w "%{http_code} %{size_download}"`

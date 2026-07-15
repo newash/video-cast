@@ -170,7 +170,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 StreamingService.start(app)
                 server.video = MediaServer.Video(video.uri, video.mime, video.sizeBytes)
                 server.subtitleVtt = current.subtitle?.vtt
-                val base = "http://$ip:${server.listeningPort}"
+                val base = "http://$ip:${server.port}"
                 castPlayer.load(
                     videoUrl = base + MediaServer.VIDEO_PATH,
                     mime = video.mime,

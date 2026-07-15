@@ -16,12 +16,12 @@ object ServerHolder {
 
     @Synchronized
     fun ensureStarted(context: Context): MediaServer {
-        server?.let { if (it.isAlive) return it }
+        server?.let { return it }
         var lastError: IOException? = null
         for (port in MediaServer.DEFAULT_PORT until MediaServer.DEFAULT_PORT + 10) {
-            val candidate = MediaServer(context.applicationContext, port)
             try {
-                candidate.start(SOCKET_READ_TIMEOUT_MS)
+                val candidate = MediaServer(context.applicationContext, port)
+                candidate.start()
                 server = candidate
                 return candidate
             } catch (e: IOException) {
@@ -36,7 +36,4 @@ object ServerHolder {
         server?.stop()
         server = null
     }
-
-    // Generous read timeout: the Chromecast holds connections open while buffering.
-    private const val SOCKET_READ_TIMEOUT_MS = 30_000
 }
