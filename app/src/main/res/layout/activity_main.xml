@@ -136,33 +136,43 @@
                 android:gravity="center"
                 android:orientation="horizontal">
 
+                <!-- Text-presentation glyphs only: ⏪⏸⏹ etc. render from the color
+                     emoji font on Android; these stay monochrome and theme-tinted. -->
                 <Button
                     android:id="@+id/rewind"
                     style="?android:attr/buttonBarButtonStyle"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="⏪ 10" />
+                    android:layout_height="64dp"
+                    android:minWidth="72dp"
+                    android:textSize="22sp"
+                    android:text="↺10" />
 
                 <Button
                     android:id="@+id/play_pause"
                     style="?android:attr/buttonBarButtonStyle"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                    android:layout_height="64dp"
+                    android:minWidth="88dp"
+                    android:textSize="26sp"
                     android:text="▶" />
 
                 <Button
                     android:id="@+id/forward"
                     style="?android:attr/buttonBarButtonStyle"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="30 ⏩" />
+                    android:layout_height="64dp"
+                    android:minWidth="72dp"
+                    android:textSize="22sp"
+                    android:text="30↻" />
 
                 <Button
                     android:id="@+id/stop"
                     style="?android:attr/buttonBarButtonStyle"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="⏹" />
+                    android:layout_height="64dp"
+                    android:minWidth="72dp"
+                    android:textSize="22sp"
+                    android:text="■" />
             </LinearLayout>
         </LinearLayout>
 

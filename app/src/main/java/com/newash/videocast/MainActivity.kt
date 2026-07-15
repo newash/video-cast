@@ -112,7 +112,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         controls.isVisible = cast.hasMedia
-        playPause.text = if (cast.playing) "⏸" else "▶"
+        playPause.text = if (cast.playing) "❚❚" else "▶"
         time.text = "${cast.positionMs.toTimeString(cast.durationMs)} / ${cast.durationMs.toTimeString()}"
         seek.takeUnless(SeekBar::isPressed)?.progress =
             if (cast.durationMs > 0) (cast.positionMs * 1000 / cast.durationMs).toInt() else 0
