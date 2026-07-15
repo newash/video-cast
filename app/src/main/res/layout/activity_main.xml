@@ -117,6 +117,14 @@
             android:orientation="vertical"
             android:visibility="gone">
 
+            <TextView
+                android:id="@+id/controls_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/leftover_media_hint"
+                android:textAppearance="?android:attr/textAppearanceSmall"
+                android:visibility="gone" />
+
             <SeekBar
                 android:id="@+id/seek"
                 android:layout_width="match_parent"

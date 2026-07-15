@@ -44,7 +44,10 @@ class MainActivity : AppCompatActivity() {
     private val searchSubtitles by lazy { findViewById<Button>(R.id.search_subtitles) }
     private val castButton by lazy { findViewById<Button>(R.id.cast) }
     private val controls by lazy { findViewById<View>(R.id.controls) }
+    private val controlsHint by lazy { findViewById<TextView>(R.id.controls_hint) }
     private val playPause by lazy { findViewById<Button>(R.id.play_pause) }
+    private val rewind by lazy { findViewById<Button>(R.id.rewind) }
+    private val forward by lazy { findViewById<Button>(R.id.forward) }
     private val time by lazy { findViewById<TextView>(R.id.time) }
     private val seek by lazy { findViewById<SeekBar>(R.id.seek) }
     private val statusView by lazy { findViewById<TextView>(R.id.status) }
@@ -112,6 +115,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
         controls.isVisible = cast.hasMedia
+        // The receiver keeps its media session across app restarts; with no video
+        // picked these controls steer a leftover stream whose server is gone —
+        // play/pause/stop still work (receiver-side), but seeking cannot.
+        controlsHint.isVisible = video == null
+        seek.isEnabled = video != null
+        rewind.isEnabled = video != null
+        forward.isEnabled = video != null
         playPause.text = if (cast.playing) "❚❚" else "▶"
         time.text = "${cast.positionMs.toTimeString(cast.durationMs)} / ${cast.durationMs.toTimeString()}"
         seek.takeUnless(SeekBar::isPressed)?.progress =
