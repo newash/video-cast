@@ -72,7 +72,8 @@ com.newash.videocast
 | File access | Storage Access Framework (`ACTION_OPEN_DOCUMENT`) | No storage permissions needed on any Android version; content URIs work on scoped storage. |
 | DI / architecture framework | None | Personal app, one screen. Manual wiring in the ViewModel. |
 
-Total third-party dependency surface: NanoHTTPD (~50 KB) plus the unavoidable
+Total third-party dependency surface: NanoHTTPD (~50 KB) and
+juniversalchardet (~250 KB, subtitle charset detection) plus the unavoidable
 androidx/Cast libraries.
 
 ### Why NanoHTTPD (the server justification)
@@ -129,8 +130,10 @@ Ktor in an afternoon.
     order, strip `{\...}` override tags, `\N` → newline, `H:MM:SS.cc` → VTT
     timestamps. Styling is discarded — text-only is the stated scope.
   - Already-VTT files pass through.
-  - Encoding: decode as UTF-8, fall back to windows-1252 when invalid
-    (covers the common legacy-SRT case).
+  - Encoding: BOM detection (UTF-8/16LE/16BE), then Mozilla's charset
+    detector (juniversalchardet, ~250 KB — the one hand-rolled piece a small
+    library genuinely beats: legacy SRTs come in windows-125x/ISO-8859-x/CJK
+    codepages), then strict UTF-8 with a windows-1252 fallback.
 - **OpenSubtitles** (`api.opensubtitles.com/api/v1`, baked-in API key, no
   login): title-query search only (`GET /subtitles?query=…&languages=…`,
   prefilled from the cleaned filename), ordered by download count. Download

@@ -10,17 +10,14 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:hint="@string/search_hint"
-        android:inputType="text"
-        android:singleLine="true" />
+        android:inputType="text" />
 
     <EditText
         android:id="@+id/languages"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:hint="@string/languages_hint"
-        android:inputType="text"
-        android:singleLine="true"
-        android:text="en" />
+        android:inputType="text" />
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -43,8 +40,15 @@
             android:visibility="gone" />
     </LinearLayout>
 
+    <TextView
+        android:id="@+id/dialog_message"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="?attr/colorError"
+        android:visibility="gone" />
+
     <ListView
         android:id="@+id/results"
         android:layout_width="match_parent"
-        android:layout_height="280dp" />
+        android:layout_height="200dp" />
 </LinearLayout>

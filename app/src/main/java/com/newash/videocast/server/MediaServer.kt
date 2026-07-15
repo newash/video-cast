@@ -54,38 +54,27 @@ class MediaServer(private val context: Context, port: Int) : NanoHTTPD(port) {
         val video = this.video
             ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "no video loaded")
         val total = video.length
-
-        when (val range = HttpRange.resolve(session.headers["range"], total)) {
-            is HttpRange.None -> {
-                val response = newFixedLengthResponse(Response.Status.OK, video.mime, openStream(video), total)
-                response.addHeader("Accept-Ranges", "bytes")
-                return response
-            }
-            is HttpRange.Unsatisfiable -> return rangeNotSatisfiable(total)
+        val response = when (val range = HttpRange.resolve(session.headers["range"], total)) {
+            is HttpRange.None ->
+                newFixedLengthResponse(Response.Status.OK, video.mime, openStream(video), total)
+            is HttpRange.Unsatisfiable ->
+                newFixedLengthResponse(Response.Status.RANGE_NOT_SATISFIABLE, MIME_PLAINTEXT, "range not satisfiable")
+                    .apply { addHeader("Content-Range", "bytes */$total") }
             is HttpRange.Partial -> {
                 val stream = openStream(video)
                 try {
-                    skipFully(stream, range.start)
+                    stream.skipFully(range.start)
                 } catch (e: IOException) {
                     stream.close()
                     throw e
                 }
-                val response = newFixedLengthResponse(
-                    Response.Status.PARTIAL_CONTENT, video.mime,
-                    BoundedInputStream(stream, range.length), range.length,
-                )
-                response.addHeader("Accept-Ranges", "bytes")
-                response.addHeader("Content-Range", "bytes ${range.start}-${range.end}/$total")
-                return response
+                // NanoHTTPD's fixed-length send path caps the body at the declared
+                // length, so the stream needs no explicit bounding.
+                newFixedLengthResponse(Response.Status.PARTIAL_CONTENT, video.mime, stream, range.length)
+                    .apply { addHeader("Content-Range", "bytes ${range.start}-${range.end}/$total") }
             }
         }
-    }
-
-    private fun rangeNotSatisfiable(total: Long): Response {
-        val response = newFixedLengthResponse(
-            Response.Status.RANGE_NOT_SATISFIABLE, MIME_PLAINTEXT, "range not satisfiable"
-        )
-        response.addHeader("Content-Range", "bytes */$total")
+        response.addHeader("Accept-Ranges", "bytes")
         return response
     }
 
@@ -93,41 +82,21 @@ class MediaServer(private val context: Context, port: Int) : NanoHTTPD(port) {
         context.contentResolver.openInputStream(video.uri)
             ?: throw IOException("cannot open ${video.uri}")
 
-    private fun skipFully(stream: InputStream, count: Long) {
+    private fun InputStream.skipFully(count: Long) {
         var remaining = count
-        val buffer = ByteArray(64 * 1024)
+        var buffer: ByteArray? = null
         while (remaining > 0) {
-            val skipped = stream.skip(remaining)
+            val skipped = skip(remaining)
             if (skipped > 0) {
                 remaining -= skipped
             } else {
                 // Some content streams refuse skip(); fall back to reading.
-                val read = stream.read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
+                val buf = buffer ?: ByteArray(64 * 1024).also { buffer = it }
+                val read = read(buf, 0, minOf(remaining, buf.size.toLong()).toInt())
                 if (read < 0) throw IOException("EOF while seeking to range start")
                 remaining -= read
             }
         }
-    }
-
-    /** Caps a stream at [limit] bytes so a 206 body matches its Content-Range. */
-    private class BoundedInputStream(private val delegate: InputStream, private var limit: Long) : InputStream() {
-        override fun read(): Int {
-            if (limit <= 0) return -1
-            val b = delegate.read()
-            if (b >= 0) limit--
-            return b
-        }
-
-        override fun read(b: ByteArray, off: Int, len: Int): Int {
-            if (limit <= 0) return -1
-            val read = delegate.read(b, off, minOf(len.toLong(), limit).toInt())
-            if (read > 0) limit -= read
-            return read
-        }
-
-        override fun available(): Int = minOf(delegate.available().toLong(), limit).toInt()
-
-        override fun close() = delegate.close()
     }
 
     companion object {

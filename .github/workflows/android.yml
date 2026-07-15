@@ -1,8 +1,6 @@
 name: Android CI
 
-on:
-  push:
-  pull_request:
+on: push
 
 jobs:
   build:
@@ -17,17 +15,15 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Unit tests
-        run: ./gradlew --no-daemon test
-
-      - name: Build debug APK
-        run: ./gradlew --no-daemon assembleDebug
+      - name: Test and build debug APK
+        run: ./gradlew test assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: videocast-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
 
       - name: Upload test reports
         if: failure()

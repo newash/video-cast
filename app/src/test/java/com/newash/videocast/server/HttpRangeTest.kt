@@ -42,4 +42,16 @@ class HttpRangeTest {
         assertEquals(HttpRange.Unsatisfiable, HttpRange.resolve("bytes=1000-", 1000))
         assertEquals(HttpRange.Unsatisfiable, HttpRange.resolve("bytes=200-100", 1000))
     }
+
+    @Test
+    fun `zero-length suffix is unsatisfiable`() {
+        assertEquals(HttpRange.Unsatisfiable, HttpRange.resolve("bytes=-0", 1000))
+    }
+
+    @Test
+    fun `multi-range degrades to an open-ended first range`() {
+        // Deliberate: multipart responses aren't supported, and the Chromecast only
+        // sends single ranges. The emitted Content-Range stays truthful.
+        assertEquals(HttpRange.Partial(0, 999), HttpRange.resolve("bytes=0-99,200-299", 1000))
+    }
 }

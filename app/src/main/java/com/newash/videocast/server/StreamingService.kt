@@ -6,10 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
-import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.newash.videocast.App
 import com.newash.videocast.MainActivity
@@ -49,16 +49,16 @@ class StreamingService : Service() {
             )
             .setOngoing(true)
             .build()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+        ServiceCompat.startForeground(
+            this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+        )
 
         ServerHolder.ensureStarted(applicationContext)
         wifiLock.acquire()
         wakeLock.acquire()
-        return START_STICKY
+        // Not sticky: after process death the ViewModel state (and thus the served
+        // video) is gone, so a restarted service would back a 404-only server.
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {

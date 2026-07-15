@@ -1,6 +1,7 @@
 package com.newash.videocast
 
 import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.View
@@ -16,6 +17,9 @@ import androidx.activity.result.contract.ActivityResultContracts.RequestPermissi
 import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -34,13 +38,25 @@ class MainActivity : AppCompatActivity() {
     private val pickSubtitle = registerForActivityResult(OpenDocument()) { it?.let(vm::onSubtitlePicked) }
     private val askNotifications = registerForActivityResult(RequestPermission()) {}
 
+    private val videoName by lazy { findViewById<TextView>(R.id.video_name) }
+    private val subtitleName by lazy { findViewById<TextView>(R.id.subtitle_name) }
+    private val clearSubtitle by lazy { findViewById<Button>(R.id.clear_subtitle) }
+    private val searchSubtitles by lazy { findViewById<Button>(R.id.search_subtitles) }
+    private val castButton by lazy { findViewById<Button>(R.id.cast) }
+    private val controls by lazy { findViewById<View>(R.id.controls) }
+    private val playPause by lazy { findViewById<Button>(R.id.play_pause) }
+    private val time by lazy { findViewById<TextView>(R.id.time) }
+    private val seek by lazy { findViewById<SeekBar>(R.id.seek) }
+    private val statusView by lazy { findViewById<TextView>(R.id.status) }
+
     private var searchDialog: SearchDialog? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        CastButtonFactory.setUpMediaRouteButton(this, view<MediaRouteButton>(R.id.cast_button))
-        if (Build.VERSION.SDK_INT >= 33) askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+        applySystemBarInsets()
+        CastButtonFactory.setUpMediaRouteButton(this, findViewById<MediaRouteButton>(R.id.cast_button))
+        if (savedInstanceState == null) requestNotificationPermissionOnce()
 
         onClick(R.id.pick_video) { pickVideo.launch(arrayOf("video/*")) }
         onClick(R.id.pick_subtitle) { pickSubtitle.launch(arrayOf("*/*")) }
@@ -51,20 +67,41 @@ class MainActivity : AppCompatActivity() {
         onClick(R.id.rewind) { vm.seekBy(-10_000) }
         onClick(R.id.forward) { vm.seekBy(30_000) }
         onClick(R.id.stop, vm::stopCasting)
-        view<SeekBar>(R.id.seek).onSeekReleased { fraction -> vm.seekToFraction(fraction) }
+        seek.onSeekReleased(vm::seekToFraction)
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) { vm.state.collect(::render) }
         }
     }
 
+    override fun onDestroy() {
+        searchDialog?.dismissSilently()
+        searchDialog = null
+        super.onDestroy()
+    }
+
+    /** targetSdk 35 enforces edge-to-edge; keep content out from under the system bars. */
+    private fun applySystemBarInsets() =
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content)) { view, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+
+    private fun requestNotificationPermissionOnce() {
+        val granted = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(
+            this, Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
     private fun render(state: UiState) = with(state) {
-        view<TextView>(R.id.video_name).text =
-            video?.let { "${it.name} (${it.sizeBytes.toHumanSize()})" } ?: getString(R.string.no_video)
-        view<TextView>(R.id.subtitle_name).text = subtitle?.name ?: getString(R.string.no_subtitles)
-        view<View>(R.id.clear_subtitle).isVisible = subtitle != null
-        view<Button>(R.id.search_subtitles).isEnabled = video != null
-        view<Button>(R.id.cast).run {
+        videoName.text = video?.let { "${it.name} (${it.sizeBytes.toHumanSize()})" }
+            ?: getString(R.string.no_video)
+        subtitleName.text = subtitle?.name ?: getString(R.string.no_subtitles)
+        clearSubtitle.isVisible = subtitle != null
+        searchSubtitles.isEnabled = video != null
+        castButton.run {
             isEnabled = video != null && cast.connected
             text = when {
                 !cast.connected -> getString(R.string.cast_no_session)
@@ -72,40 +109,35 @@ class MainActivity : AppCompatActivity() {
                 else -> getString(R.string.cast)
             }
         }
-        view<View>(R.id.controls).isVisible = cast.hasMedia
-        view<Button>(R.id.play_pause).text = if (cast.playing) "⏸" else "▶"
-        view<TextView>(R.id.position).text = cast.positionMs.toTimeString()
-        view<TextView>(R.id.duration).text = cast.durationMs.toTimeString()
-        view<SeekBar>(R.id.seek).takeUnless(SeekBar::isPressed)?.progress =
+        controls.isVisible = cast.hasMedia
+        playPause.text = if (cast.playing) "⏸" else "▶"
+        time.text = "${cast.positionMs.toTimeString()} / ${cast.durationMs.toTimeString()}"
+        seek.takeUnless(SeekBar::isPressed)?.progress =
             if (cast.durationMs > 0) (cast.positionMs * 1000 / cast.durationMs).toInt() else 0
-        view<TextView>(R.id.status).run {
-            isVisible = status != null
-            text = status.orEmpty()
+        statusView.run {
+            isVisible = state.status != null
+            text = state.status.orEmpty()
         }
         syncSearchDialog(search)
     }
 
     private fun syncSearchDialog(search: SearchState?) {
-        when {
-            search == null -> {
-                searchDialog?.dismissSilently()
-                searchDialog = null
-            }
-            searchDialog == null -> searchDialog = SearchDialog(
-                activity = this,
-                defaultQuery = vm.state.value.defaultQuery,
-                onSearch = vm::searchSubtitles,
-                onPick = vm::downloadSubtitle,
-                onDismiss = vm::closeSearch,
-            ).also { it.update(search) }
-            else -> searchDialog?.update(search)
+        if (search == null) {
+            searchDialog?.dismissSilently()
+            searchDialog = null
+            return
         }
+        (searchDialog ?: SearchDialog(
+            activity = this,
+            defaultQuery = vm.state.value.defaultQuery,
+            onSearch = vm::searchSubtitles,
+            onPick = vm::downloadSubtitle,
+            onDismiss = vm::closeSearch,
+        ).also { searchDialog = it }).update(search)
     }
 
-    private fun <T : View> view(id: Int): T = findViewById(id)
-
     private fun onClick(id: Int, action: () -> Unit) =
-        view<View>(id).setOnClickListener { action() }
+        findViewById<View>(id).setOnClickListener { action() }
 }
 
 /** The OpenSubtitles search dialog — plain system AlertDialog around dialog_search.xml. */
@@ -117,8 +149,15 @@ private class SearchDialog(
     onDismiss: () -> Unit,
 ) {
     private val content = activity.layoutInflater.inflate(R.layout.dialog_search, null)
+    private val query = content.findViewById<EditText>(R.id.query)
+    private val languages = content.findViewById<EditText>(R.id.languages)
+    private val searchButton = content.findViewById<Button>(R.id.search)
+    private val progress = content.findViewById<ProgressBar>(R.id.progress)
+    private val message = content.findViewById<TextView>(R.id.dialog_message)
     private val adapter = ArrayAdapter<String>(activity, android.R.layout.simple_list_item_1)
+
     private var results: List<OpenSubtitlesClient.Result> = emptyList()
+    private var rendered: SearchState? = null
 
     private val dialog: AlertDialog = AlertDialog.Builder(activity)
         .setTitle(R.string.opensubtitles)
@@ -128,12 +167,9 @@ private class SearchDialog(
         .show()
 
     init {
-        content.findViewById<EditText>(R.id.query).setText(defaultQuery)
-        content.findViewById<Button>(R.id.search).setOnClickListener {
-            onSearch(
-                content.findViewById<EditText>(R.id.query).text.toString(),
-                content.findViewById<EditText>(R.id.languages).text.toString().ifBlank { "en" },
-            )
+        query.setText(defaultQuery)
+        searchButton.setOnClickListener {
+            onSearch(query.text.toString(), languages.text.toString().ifBlank { "en" })
         }
         content.findViewById<ListView>(R.id.results).run {
             adapter = this@SearchDialog.adapter
@@ -142,9 +178,13 @@ private class SearchDialog(
     }
 
     fun update(search: SearchState) {
+        if (search == rendered) return // ignore the 500 ms cast-progress ticks
+        rendered = search
         results = search.results
-        content.findViewById<ProgressBar>(R.id.progress).isVisible = search.searching
-        content.findViewById<Button>(R.id.search).isEnabled = !search.searching
+        progress.isVisible = search.searching
+        searchButton.isEnabled = !search.searching
+        message.isVisible = search.message != null
+        message.text = search.message.orEmpty()
         adapter.run {
             clear()
             addAll(search.results.map { "[${it.language}] ${it.name}" })

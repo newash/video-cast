@@ -20,20 +20,16 @@ sealed class HttpRange {
 
     companion object {
         fun resolve(header: String?, total: Long): HttpRange {
-            if (header == null || !header.startsWith("bytes=")) return None
+            if (header?.startsWith("bytes=") != true) return None
             val spec = header.removePrefix("bytes=").trim().split("-", limit = 2)
-            var start = spec.getOrNull(0)?.takeIf { it.isNotEmpty() }?.toLongOrNull()
-            var end = spec.getOrNull(1)?.takeIf { it.isNotEmpty() }?.toLongOrNull()
-            if (start == null && end == null) return None
-            if (start == null) {
-                // Suffix form "bytes=-N": the final N bytes.
-                start = maxOf(0, total - end!!)
-                end = total - 1
-            } else if (end == null || end >= total) {
-                end = total - 1
+            val first = spec[0].toLongOrNull()
+            val second = spec.getOrNull(1)?.toLongOrNull()
+            val (start, end) = when {
+                first == null && second == null -> return None
+                first == null -> maxOf(0, total - second!!) to total - 1 // suffix "-N": final N bytes
+                else -> first to minOf(second ?: Long.MAX_VALUE, total - 1)
             }
-            if (start >= total || start > end) return Unsatisfiable
-            return Partial(start, end)
+            return if (start >= total || start > end) Unsatisfiable else Partial(start, end)
         }
     }
 }

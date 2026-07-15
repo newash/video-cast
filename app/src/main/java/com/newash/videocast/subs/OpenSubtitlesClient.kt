@@ -1,8 +1,10 @@
 package com.newash.videocast.subs
 
+import com.newash.videocast.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -20,34 +22,56 @@ class OpenSubtitlesClient(private val apiKey: String) {
     data class Result(val fileId: Long, val name: String, val language: String)
 
     suspend fun search(query: String, languages: String): List<Result> = withContext(Dispatchers.IO) {
-        val url = "$BASE_URL/subtitles?query=${query.urlEncoded()}&languages=${languages.urlEncoded()}" +
-            "&order_by=download_count&order_direction=desc"
-        JSONObject(request(url)).getJSONArray("data").toResults()
+        // The API requires query params lowercase and alphabetically sorted
+        // (unsorted requests get bounced through a 301 that can drop headers).
+        val url = "$BASE_URL/subtitles" +
+            "?languages=${languages.lowercase().urlEncoded()}" +
+            "&order_by=download_count&order_direction=desc" +
+            "&query=${query.lowercase().urlEncoded()}"
+        parsed { JSONObject(request(url)).getJSONArray("data").toResults() }
     }
 
     /** Requests a temporary download link, then fetches the raw subtitle bytes. */
     suspend fun download(fileId: Long): ByteArray = withContext(Dispatchers.IO) {
-        val link = JSONObject(request("$BASE_URL/download", body = """{"file_id":$fileId}"""))
-            .getString("link")
-        URL(link).openStream().use { it.readBytes() }
+        val link = parsed {
+            JSONObject(request("$BASE_URL/download", body = """{"file_id":$fileId}""")).getString("link")
+        }
+        connect(link).run {
+            val code = responseCode
+            if (code !in 200..299) throw IOException("subtitle download failed: HTTP $code")
+            inputStream.use { it.readBytes() }
+        }
     }
 
-    private fun request(url: String, body: String? = null): String =
-        (URL(url).openConnection() as HttpURLConnection).run {
-            setRequestProperty("Api-Key", apiKey)
-            setRequestProperty("User-Agent", USER_AGENT)
-            setRequestProperty("Accept", "application/json")
-            body?.let {
-                requestMethod = "POST"
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-                outputStream.use { out -> out.write(it.toByteArray()) }
-            }
-            val text = (if (responseCode < 400) inputStream else errorStream)
-                ?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (responseCode >= 400) throw IOException("OpenSubtitles HTTP $responseCode: ${text.take(200)}")
-            text
+    private fun request(url: String, body: String? = null): String = connect(url).run {
+        setRequestProperty("Api-Key", apiKey)
+        setRequestProperty("User-Agent", USER_AGENT)
+        setRequestProperty("Accept", "application/json")
+        body?.let {
+            requestMethod = "POST"
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            outputStream.use { out -> out.write(it.toByteArray(Charsets.UTF_8)) }
         }
+        val code = responseCode
+        val text = (if (code in 200..299) inputStream else errorStream)
+            ?.bufferedReader()?.use { it.readText() }.orEmpty()
+        if (code !in 200..299) throw IOException("OpenSubtitles HTTP $code: ${text.take(200)}")
+        text
+    }
+
+    private fun connect(url: String): HttpURLConnection =
+        (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 10_000
+            readTimeout = 15_000
+        }
+
+    /** A 200 with an unexpected shape is a network-layer failure to callers. */
+    private fun <T> parsed(block: () -> T): T = try {
+        block()
+    } catch (e: JSONException) {
+        throw IOException("unexpected OpenSubtitles response: ${e.message}")
+    }
 
     private fun JSONArray.toResults(): List<Result> = (0 until length()).mapNotNull { i ->
         val attributes = optJSONObject(i)?.optJSONObject("attributes") ?: return@mapNotNull null
@@ -63,6 +87,6 @@ class OpenSubtitlesClient(private val apiKey: String) {
 
     private companion object {
         const val BASE_URL = "https://api.opensubtitles.com/api/v1"
-        const val USER_AGENT = "VideoCast v1.0"
+        val USER_AGENT = "VideoCast v${BuildConfig.VERSION_NAME}"
     }
 }

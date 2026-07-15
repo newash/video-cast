@@ -21,7 +21,7 @@ object ServerHolder {
         for (port in MediaServer.DEFAULT_PORT until MediaServer.DEFAULT_PORT + 10) {
             val candidate = MediaServer(context.applicationContext, port)
             try {
-                candidate.start(SOCKET_READ_TIMEOUT_MS, false)
+                candidate.start(SOCKET_READ_TIMEOUT_MS)
                 server = candidate
                 return candidate
             } catch (e: IOException) {

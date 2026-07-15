@@ -4,6 +4,8 @@
     <string name="streaming_channel_name">Local streaming server</string>
     <string name="streaming_notification_title">Serving video to Chromecast</string>
     <string name="streaming_notification_text">Local HTTP server is running</string>
+    <string name="section_video">🎬 Video</string>
+    <string name="section_subtitles">💬 Subtitles</string>
     <string name="no_video">No video selected</string>
     <string name="no_subtitles">No subtitles</string>
     <string name="pick_video">Pick video</string>

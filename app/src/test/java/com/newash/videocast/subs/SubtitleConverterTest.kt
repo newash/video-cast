@@ -81,4 +81,41 @@ class SubtitleConverterTest {
         val bytes = "caf".toByteArray() + byteArrayOf(0xE9.toByte())
         assertEquals("café", SubtitleConverter.decode(bytes))
     }
+
+    @Test
+    fun `utf-16 boms are honoured`() {
+        assertEquals("WEBVTT", SubtitleConverter.decode(byteArrayOf(0xFF.toByte(), 0xFE.toByte()) + "WEBVTT".toByteArray(Charsets.UTF_16LE)))
+        assertEquals("WEBVTT", SubtitleConverter.decode(byteArrayOf(0xFE.toByte(), 0xFF.toByte()) + "WEBVTT".toByteArray(Charsets.UTF_16BE)))
+    }
+
+    @Test
+    fun `ass cues are emitted sorted by start time`() {
+        val ass = """
+            [Events]
+            Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+            Dialogue: 0,0:01:00.00,0:01:02.00,Default,,0,0,0,,Second
+            Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,First
+        """.trimIndent()
+
+        val vtt = SubtitleConverter.assToVtt(ass)
+        assertTrue(vtt.indexOf("First") < vtt.indexOf("Second"))
+    }
+
+    @Test
+    fun `ass without a format line falls back to spec-default field order`() {
+        val ass = """
+            [Events]
+            Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Hello
+        """.trimIndent()
+
+        val vtt = SubtitleConverter.assToVtt(ass)
+        assertTrue(vtt.contains("00:00:01.000 --> 00:00:02.000"))
+        assertTrue(vtt.contains("Hello"))
+    }
+
+    @Test
+    fun `vtt passthrough strips leading whitespace for the strict receiver`() {
+        val vtt = SubtitleConverter.toVtt("\n\nWEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi".toByteArray(), "x.vtt")
+        assertTrue(vtt.startsWith("WEBVTT"))
+    }
 }
