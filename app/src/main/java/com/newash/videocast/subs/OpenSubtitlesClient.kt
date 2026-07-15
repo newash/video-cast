@@ -39,7 +39,19 @@ class OpenSubtitlesClient(private val apiKey: String) {
         connect(link).run {
             val code = responseCode
             if (code !in 200..299) throw IOException("subtitle download failed: HTTP $code")
-            inputStream.use { it.readBytes() }
+            inputStream.use { it.readAtMost(MAX_SUBTITLE_BYTES) }
+        }
+    }
+
+    /** Bounded read: a wrong payload behind the download link must not balloon into an OOM. */
+    private fun java.io.InputStream.readAtMost(limit: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            val read = read(buffer)
+            if (read < 0) return out.toByteArray()
+            out.write(buffer, 0, read)
+            if (out.size() > limit) throw IOException("subtitle download larger than $limit bytes")
         }
     }
 
@@ -96,6 +108,7 @@ class OpenSubtitlesClient(private val apiKey: String) {
 
     private companion object {
         const val BASE_URL = "https://api.opensubtitles.com/api/v1"
+        const val MAX_SUBTITLE_BYTES = 5 * 1024 * 1024
         val USER_AGENT = "VideoCast v${BuildConfig.VERSION_NAME}"
     }
 }

@@ -170,8 +170,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         searchJob = viewModelScope.launch {
             updateSearch { it.copy(searching = true, message = null) }
             try {
-                val vtt = SubtitleConverter.toVtt(openSubtitles.download(result.fileId), result.name)
-                setSubtitle(SubtitleTrack(result.name, vtt, result.language.take(2).ifBlank { "en" }))
+                val track = withContext(Dispatchers.IO) {
+                    val vtt = SubtitleConverter.toVtt(openSubtitles.download(result.fileId), result.name)
+                    SubtitleTrack(result.name, vtt, result.language.take(2).ifBlank { "en" })
+                }
+                setSubtitle(track)
                 closeSearch()
             } catch (e: CancellationException) {
                 throw e
