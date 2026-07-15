@@ -157,6 +157,14 @@ private class SearchDialog(
     }
 }
 
+private fun SeekBar.onSeekReleased(action: (fraction: Float) -> Unit) =
+    setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+        override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {}
+        override fun onStartTrackingTouch(seekBar: SeekBar) {}
+        override fun onStopTrackingTouch(seekBar: SeekBar) =
+            action(seekBar.progress / seekBar.max.coerceAtLeast(1).toFloat())
+    })
+
 private fun Long.toTimeString(): String = (this / 1000).let { s ->
     if (s >= 3600) {
         String.format(Locale.US, "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
