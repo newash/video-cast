@@ -33,14 +33,25 @@ class OpenSubtitlesClient(private val apiKey: String) {
 
     /** Requests a temporary download link, then fetches the raw subtitle bytes. */
     suspend fun download(fileId: Long): ByteArray = withContext(Dispatchers.IO) {
-        val link = parsed {
-            JSONObject(request("$BASE_URL/download", body = """{"file_id":$fileId}""")).getString("link")
+        val link = stage("requesting download link") {
+            parsed {
+                JSONObject(request("$BASE_URL/download", body = """{"file_id":$fileId}""")).getString("link")
+            }
         }
-        connect(link).run {
-            val code = responseCode
-            if (code !in 200..299) throw IOException("subtitle download failed: HTTP $code")
-            inputStream.use { it.readAtMost(MAX_SUBTITLE_BYTES) }
+        stage("fetching subtitle file") {
+            connect(link).run {
+                val code = responseCode
+                if (code !in 200..299) throw IOException("HTTP $code")
+                inputStream.use { it.readAtMost(MAX_SUBTITLE_BYTES) }
+            }
         }
+    }
+
+    /** Names the failing leg — "timeout" alone doesn't say which server was slow. */
+    private inline fun <T> stage(name: String, block: () -> T): T = try {
+        block()
+    } catch (e: IOException) {
+        throw IOException("$name: ${e.message}")
     }
 
     /** Bounded read: a wrong payload behind the download link must not balloon into an OOM. */
@@ -79,8 +90,9 @@ class OpenSubtitlesClient(private val apiKey: String) {
 
     private fun connect(url: String): HttpURLConnection =
         (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 10_000
-            readTimeout = 15_000
+            // Generous: the anonymous /download endpoint is known to be slow.
+            connectTimeout = 15_000
+            readTimeout = 40_000
         }
 
     /** A 200 with an unexpected shape is a network-layer failure to callers. */
