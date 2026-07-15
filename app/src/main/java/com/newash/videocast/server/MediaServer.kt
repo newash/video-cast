@@ -3,6 +3,7 @@ package com.newash.videocast.server
 import android.content.Context
 import android.net.Uri
 import net.freeutils.httpserver.HTTPServer
+import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
 
@@ -14,8 +15,9 @@ import java.io.InputStream
  *
  * Every response carries permissive CORS headers: the default media receiver
  * fetches text tracks with CORS enforced and silently drops the track without
- * them. Range parsing, 206/Content-Range emission, and HEAD handling come from
- * JLHTTP (RFC 9110-conformant); only the stream pre-skip is ours.
+ * them. Range parsing, 206/Content-Range emission, body slicing, and HEAD
+ * handling are all JLHTTP's (RFC 9110-conformant); ours is only CORS and the
+ * skip-by-reading stream wrapper.
  */
 class MediaServer(private val context: Context, val port: Int) {
 
@@ -32,8 +34,8 @@ class MediaServer(private val context: Context, val port: Int) {
         getVirtualHost(null).run {
             // Registering OPTIONS routes CORS preflights through our handlers
             // instead of JLHTTP's default OPTIONS response (which lacks CORS).
-            addContext(VIDEO_PATH, { req, resp -> withCors(req, resp, ::serveVideo) }, "GET", "OPTIONS")
-            addContext(SUBTITLE_PATH, { req, resp -> withCors(req, resp, ::serveSubtitles) }, "GET", "OPTIONS")
+            addContext(VIDEO_PATH, cors(::serveVideo), "GET", "OPTIONS")
+            addContext(SUBTITLE_PATH, cors(::serveSubtitles), "GET", "OPTIONS")
         }
     }
 
@@ -42,29 +44,24 @@ class MediaServer(private val context: Context, val port: Int) {
 
     fun stop() = server.stop()
 
-    private fun withCors(
-        req: HTTPServer.Request,
-        resp: HTTPServer.Response,
-        handler: (HTTPServer.Request, HTTPServer.Response) -> Int,
-    ): Int {
+    private fun cors(handler: HTTPServer.ContextHandler) = HTTPServer.ContextHandler { req, resp ->
         resp.headers.run {
             add("Access-Control-Allow-Origin", "*")
             add("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
             add("Access-Control-Allow-Headers", "Content-Type, Range")
             add("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges")
         }
-        return if (req.method == "OPTIONS") {
+        if (req.method == "OPTIONS") {
             resp.sendHeaders(204)
             0
         } else {
-            handler(req, resp)
+            handler.serve(req, resp)
         }
     }
 
     private fun serveSubtitles(req: HTTPServer.Request, resp: HTTPServer.Response): Int {
         val bytes = (subtitleVtt ?: return 404).toByteArray(Charsets.UTF_8)
-        resp.headers.add("Content-Type", "text/vtt; charset=utf-8")
-        resp.sendHeaders(200, bytes.size.toLong(), -1, null, null, null)
+        resp.sendHeaders(200, bytes.size.toLong(), -1, null, "text/vtt; charset=utf-8", null)
         resp.sendBody(bytes.inputStream(), bytes.size.toLong(), null)
         return 0
     }
@@ -80,32 +77,25 @@ class MediaServer(private val context: Context, val port: Int) {
             return 416
         }
         resp.sendHeaders(200, total, -1, null, video.mime, range) // a range flips this to 206
-        openStream(video).use { stream ->
-            // Pre-skip with a read fallback: some DocumentsProvider streams refuse
-            // skip(), which JLHTTP's own range skipping relies on exclusively.
-            stream.skipFully(range?.get(0) ?: 0)
-            resp.sendBody(stream, range?.let { it[1] - it[0] + 1 } ?: total, null)
-        }
+        openStream(video).use { resp.sendBody(it, total, range) }
         return 0
     }
 
     private fun openStream(video: Video): InputStream =
-        context.contentResolver.openInputStream(video.uri)
+        context.contentResolver.openInputStream(video.uri)?.let(::SkipByReadingInputStream)
             ?: throw IOException("cannot open ${video.uri}")
 
-    private fun InputStream.skipFully(count: Long) {
-        var remaining = count
-        var buffer: ByteArray? = null
-        while (remaining > 0) {
-            val skipped = skip(remaining)
-            if (skipped > 0) {
-                remaining -= skipped
-            } else {
-                val buf = buffer ?: ByteArray(64 * 1024).also { buffer = it }
-                val read = read(buf, 0, minOf(remaining, buf.size.toLong()).toInt())
-                if (read < 0) throw IOException("EOF while seeking to range start")
-                remaining -= read
-            }
+    /**
+     * JLHTTP's range slicing calls skip() and treats 0 as failure; some
+     * DocumentsProvider streams refuse skip(), so fall back to reading.
+     */
+    private class SkipByReadingInputStream(delegate: InputStream) : FilterInputStream(delegate) {
+        override fun skip(n: Long): Long {
+            val skipped = super.skip(n)
+            if (skipped > 0 || n <= 0) return skipped
+            val buffer = ByteArray(minOf(n, 64L * 1024).toInt())
+            val read = read(buffer)
+            return if (read < 0) 0 else read.toLong()
         }
     }
 

@@ -87,9 +87,9 @@ Candidates considered:
   emits 206/`Content-Range` — the classic Chromecast-seek failure points are
   library code, not ours. HEAD and OPTIONS are handled per spec. Our code is
   two small context handlers: CORS headers (the silent-subtitle-drop
-  failure point) plus a stream pre-skip with a read fallback, because some
-  `DocumentsProvider` streams refuse `skip()`, which JLHTTP's own range
-  skipping relies on. A JVM contract test (`JlhttpContractTest`) pins the
+  failure point) plus a skip-by-reading stream wrapper, because some
+  `DocumentsProvider` streams refuse `skip()`, which JLHTTP's range slicing
+  relies on. A JVM contract test (`JlhttpContractTest`) pins the
   range/CORS/HEAD semantics over real HTTP.
 - **NanoHTTPD** — the traditional choice (and this project's original one):
   same weight class, but abandoned since 2016 with an unpatched CVE, no
@@ -108,11 +108,12 @@ Candidates considered:
 
 ### Serving details that make or break casting
 
-- **Range/206** (`/video`): parsing and 206/`Content-Range`/416 emission are
-  JLHTTP's (RFC 9110); we add `Accept-Ranges: bytes` and open a fresh
-  `ContentResolver` stream per request, pre-skipped to the offset with a
-  read fallback — Chromecast issues a new range request on every seek, and
-  open-skip is the only approach that works across all `DocumentsProvider`s.
+- **Range/206** (`/video`): parsing, 206/`Content-Range`/416 emission, and
+  body slicing are all JLHTTP's (RFC 9110); we add `Accept-Ranges: bytes`
+  and open a fresh `ContentResolver` stream per request, wrapped so that
+  `skip()` falls back to reading — Chromecast issues a new range request on
+  every seek, and some `DocumentsProvider` streams refuse `skip()`, which
+  JLHTTP's slicing relies on.
 - **CORS** (`/subs.vtt` — and harmlessly on everything): the default
   receiver's player fetches text tracks with CORS enforced;
   `Access-Control-Allow-Origin: *` (plus `OPTIONS` preflight handling) or

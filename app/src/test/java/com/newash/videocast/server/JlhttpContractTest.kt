@@ -7,18 +7,18 @@ import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import java.io.File
-import java.io.IOException
-import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.ServerSocket
 import java.net.URL
 
 /**
- * Integration test mirroring MediaServer's JLHTTP usage (file-backed instead of
- * ContentResolver): verifies range semantics, CORS, OPTIONS, and HEAD over real HTTP.
+ * Contract test mirroring MediaServer's JLHTTP usage (file-backed instead of
+ * ContentResolver): pins the range/CORS/OPTIONS/HEAD semantics over real HTTP.
  */
 class JlhttpContractTest {
 
-    private val port = 18394
+    // Ephemeral: debug and release unit-test variants run concurrently in CI.
+    private val port = ServerSocket(0).use { it.localPort }
     private lateinit var file: File
     private lateinit var server: HTTPServer
     private val body = ByteArray(1000) { (it % 251).toByte() }
@@ -44,10 +44,7 @@ class JlhttpContractTest {
                     return@addContext 416
                 }
                 resp.sendHeaders(200, total, -1, null, "video/mp4", range)
-                file.inputStream().use { stream ->
-                    stream.skipFully(range?.get(0) ?: 0)
-                    resp.sendBody(stream, range?.let { it[1] - it[0] + 1 } ?: total, null)
-                }
+                file.inputStream().use { resp.sendBody(it, total, range) }
                 0
             }, "GET", "OPTIONS")
         }
@@ -120,19 +117,5 @@ class JlhttpContractTest {
         assertEquals(200, responseCode)
         assertEquals("1000", getHeaderField("Content-Length"))
         assertEquals(-1, inputStream.read())
-    }
-}
-
-private fun InputStream.skipFully(count: Long) {
-    var remaining = count
-    while (remaining > 0) {
-        val skipped = skip(remaining)
-        if (skipped > 0) remaining -= skipped
-        else {
-            val buf = ByteArray(minOf(remaining, 65536).toInt())
-            val read = read(buf)
-            if (read < 0) throw IOException("EOF while seeking")
-            remaining -= read
-        }
     }
 }
