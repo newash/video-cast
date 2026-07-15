@@ -99,8 +99,13 @@ Candidates considered:
 
 Serving two fixed routes to a single well-behaved client on a LAN is the
 minimal-server use case; NanoHTTPD is the minimal server. If upstream
-dormancy ever bites, the `serve()` implementation is small enough to port to
-Ktor in an afternoon.
+dormancy ever bites, the designated successor is **JLHTTP**
+(`net.freeutils:jlhttp`) — the one maintained, RFC 9110-conformant,
+single-file (~65 KB), Android-compatible equivalent. Our exposure is ~30
+lines (`serve()` override + response construction); the tested `HttpRange`
+resolver, CORS headers, and ContentResolver stream plumbing carry over
+unchanged. Deliberately deferred until after the app has proven itself
+against a real Chromecast, to avoid debugging two unknowns at once.
 
 ### Serving details that make or break casting
 
