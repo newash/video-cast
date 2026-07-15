@@ -71,9 +71,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         App.consumeLastCrash(app)?.let { crash ->
-            _state.update {
-                it.copy(status = "Previous crash:\n" + crash.lineSequence().take(5).joinToString("\n"))
-            }
+            // Exception headers and Caused-by lines carry the signal; frames don't.
+            val summary = crash.lineSequence()
+                .filterNot { line -> line.trimStart().startsWith("at ") }
+                .take(6)
+                .joinToString("\n")
+            _state.update { it.copy(status = "Previous crash:\n$summary") }
         }
         // The Cast SDK requires main-thread access; poll instead of juggling
         // per-session progress listeners. Skip the work while nothing collects

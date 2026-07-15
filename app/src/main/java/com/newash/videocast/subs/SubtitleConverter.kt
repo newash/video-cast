@@ -134,10 +134,12 @@ object SubtitleConverter {
     private val SRT_TIMING = Regex(
         """(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})[ \t]*-->[ \t]*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})"""
     )
+    // Literal } and ] must be escaped: Android's ICU regex rejects the bare
+    // forms that the desktop JVM (and thus our unit tests) happily accepts.
     private val ASS_TIME = Regex("""(\d{1,4}):(\d{2}):(\d{2})[.:](\d{2})""")
-    private val ASS_OVERRIDE = Regex("""\{[^}]*}""")
+    private val ASS_OVERRIDE = Regex("""\{[^}]*\}""")
     private val BLANK_LINES = Regex("""\n[ \t]*(\n[ \t]*)+""")
-    private val ASS_EVENTS_HEADER = Regex("""(?m)^\s*\[Events]""")
+    private val ASS_EVENTS_HEADER = Regex("""(?m)^\s*\[Events\]""")
 
     // Spec-default v4+ field order, used when a malformed file omits its Format: line.
     private val ASS_DEFAULT_FIELDS = listOf(
