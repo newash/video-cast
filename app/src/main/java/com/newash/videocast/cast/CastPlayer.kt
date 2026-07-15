@@ -20,8 +20,11 @@ import com.google.android.gms.cast.framework.media.RemoteMediaClient
  */
 class CastPlayer(
     context: Context,
-    /** Fired only when a session terminally ends — not on transient suspensions. */
-    private val onSessionEnded: () -> Unit,
+    /**
+     * Fired on every terminal session outcome — ended, or a failed start/resume
+     * (after which the SDK never calls onSessionEnded). Not on transient suspensions.
+     */
+    private val onSessionTerminated: () -> Unit,
 ) {
 
     data class Progress(
@@ -35,20 +38,24 @@ class CastPlayer(
     private val castContext: CastContext = CastContext.getSharedInstance(context.applicationContext)
 
     private val sessionListener = object : SessionManagerListener<CastSession> {
-        override fun onSessionEnded(session: CastSession, error: Int) = onSessionEnded()
+        override fun onSessionEnded(session: CastSession, error: Int) = onSessionTerminated()
+        override fun onSessionStartFailed(session: CastSession, error: Int) = onSessionTerminated()
+        override fun onSessionResumeFailed(session: CastSession, error: Int) = onSessionTerminated()
         override fun onSessionStarted(session: CastSession, sessionId: String) {}
         override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {}
         override fun onSessionSuspended(session: CastSession, reason: Int) {}
         override fun onSessionStarting(session: CastSession) {}
-        override fun onSessionStartFailed(session: CastSession, error: Int) {}
         override fun onSessionEnding(session: CastSession) {}
         override fun onSessionResuming(session: CastSession, sessionId: String) {}
-        override fun onSessionResumeFailed(session: CastSession, error: Int) {}
     }
 
     init {
         castContext.sessionManager.addSessionManagerListener(sessionListener, CastSession::class.java)
     }
+
+    /** Detach from the process-wide CastContext (the ViewModel is being destroyed). */
+    fun release() =
+        castContext.sessionManager.removeSessionManagerListener(sessionListener, CastSession::class.java)
 
     private val remote: RemoteMediaClient?
         get() = castContext.sessionManager.currentCastSession?.remoteMediaClient

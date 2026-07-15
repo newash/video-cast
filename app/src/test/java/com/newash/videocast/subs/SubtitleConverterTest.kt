@@ -114,6 +114,18 @@ class SubtitleConverterTest {
     }
 
     @Test
+    fun `consecutive ass line breaks collapse instead of terminating the cue`() {
+        val ass = """
+            [Events]
+            Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+            Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,foo\N\Nbar
+        """.trimIndent()
+
+        val vtt = SubtitleConverter.assToVtt(ass)
+        assertTrue(vtt.contains("foo\nbar"))
+    }
+
+    @Test
     fun `vtt passthrough strips leading whitespace for the strict receiver`() {
         val vtt = SubtitleConverter.toVtt("\n\nWEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi".toByteArray(), "x.vtt")
         assertTrue(vtt.startsWith("WEBVTT"))

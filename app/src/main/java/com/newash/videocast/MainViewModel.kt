@@ -2,6 +2,7 @@ package com.newash.videocast
 
 import android.app.Application
 import android.content.ContentResolver
+import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -14,7 +15,9 @@ import com.newash.videocast.server.StreamingService
 import com.newash.videocast.subs.OpenSubtitlesClient
 import com.newash.videocast.subs.SubtitleConverter
 import com.newash.videocast.util.localIpv4
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +35,9 @@ data class SearchState(
     val searching: Boolean = false,
     /** Error or empty-result message shown inside the dialog. */
     val message: String? = null,
+    /** Last submitted (or prefilled) inputs — survive dialog recreation on rotation. */
+    val query: String = "",
+    val languages: String = "en",
 )
 
 data class UiState(
@@ -52,26 +58,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
 
-    // Release the server, wifi lock, and wake lock as soon as the cast session
-    // terminally ends — no battery spent after the movie.
-    private val castPlayer by lazy {
-        CastPlayer(app) { StreamingService.stop(app) }
+    // null when Play Services is unavailable — casting is then simply off.
+    // Session termination (ended, or failed start/resume) releases the server,
+    // wifi lock, and wake lock: no battery spent after the movie.
+    private val castPlayer: CastPlayer? by lazy {
+        runCatching { CastPlayer(app) { StreamingService.stop(app) } }.getOrNull()
     }
 
     private val openSubtitles = OpenSubtitlesClient(BuildConfig.OPENSUBTITLES_API_KEY)
 
+    private var searchJob: Job? = null
+
     init {
         // The Cast SDK requires main-thread access; poll instead of juggling
-        // per-session progress listeners. The lazy init is materialized inside
-        // runCatching: getSharedInstance throws on devices without Play Services,
-        // in which case casting is simply unavailable (no polling, no crash).
+        // per-session progress listeners. Skip the work while nothing collects
+        // (screen off / app backgrounded).
         viewModelScope.launch {
-            val player = runCatching { castPlayer }.getOrNull() ?: return@launch
+            val player = castPlayer ?: return@launch
             while (isActive) {
-                runCatching(player::progress).onSuccess { p -> _state.update { it.copy(cast = p) } }
+                if (_state.subscriptionCount.value > 0) {
+                    runCatching(player::progress).onSuccess { p -> _state.update { it.copy(cast = p) } }
+                }
                 delay(500)
             }
         }
+    }
+
+    override fun onCleared() {
+        castPlayer?.release()
     }
 
     fun onVideoPicked(uri: Uri) {
@@ -84,31 +98,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onSubtitlePicked(uri: Uri) {
         viewModelScope.launch {
-            runCatching {
-                withContext(Dispatchers.IO) {
+            try {
+                val track = withContext(Dispatchers.IO) {
                     val name = app.contentResolver.displayName(uri) ?: "subtitle"
                     val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                         ?: error("cannot read subtitle file")
                     SubtitleTrack(name, SubtitleConverter.toVtt(bytes, name), language = "en")
                 }
-            }.fold(
-                onSuccess = ::setSubtitle,
-                onFailure = { e -> _state.update { it.copy(status = "Subtitle error: ${e.message}") } },
-            )
+                setSubtitle(track)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(status = "Subtitle error: ${e.message}") }
+            }
         }
     }
 
     fun clearSubtitle() {
         ServerHolder.server?.subtitleVtt = null
-        _state.update { it.copy(subtitle = null) }
+        _state.update { it.copy(subtitle = null, status = null) }
     }
 
     fun openSearch() {
-        _state.update { it.copy(search = SearchState()) }
-        searchSubtitles(_state.value.defaultQuery, "en")
+        val query = _state.value.defaultQuery
+        _state.update { it.copy(search = SearchState(query = query)) }
+        searchSubtitles(query, "en")
     }
 
-    fun closeSearch() = _state.update { it.copy(search = null) }
+    fun closeSearch() {
+        searchJob?.cancel()
+        _state.update { it.copy(search = null) }
+    }
 
     /** Updates search state only while the dialog is still open — a response must not resurrect it. */
     private fun updateSearch(transform: (SearchState) -> SearchState) =
@@ -116,36 +136,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun searchSubtitles(query: String, languages: String) {
         if (query.isBlank()) return
-        viewModelScope.launch {
-            updateSearch { it.copy(searching = true, message = null) }
-            runCatching { openSubtitles.search(query, languages) }.fold(
-                onSuccess = { results ->
-                    updateSearch {
-                        it.copy(
-                            results = results,
-                            searching = false,
-                            message = app.getString(R.string.no_results).takeIf { _ -> results.isEmpty() },
-                        )
-                    }
-                },
-                onFailure = { e -> updateSearch { it.copy(searching = false, message = "Search failed: ${e.message}") } },
-            )
+        searchJob?.cancel() // a stale response must not paint into a newer dialog generation
+        searchJob = viewModelScope.launch {
+            updateSearch { it.copy(searching = true, message = null, query = query, languages = languages) }
+            try {
+                val results = openSubtitles.search(query, languages)
+                updateSearch {
+                    it.copy(
+                        results = results,
+                        searching = false,
+                        message = app.getString(R.string.no_results).takeIf { _ -> results.isEmpty() },
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                updateSearch { it.copy(searching = false, message = "Search failed: ${e.message}") }
+            }
         }
     }
 
     fun downloadSubtitle(result: OpenSubtitlesClient.Result) {
-        viewModelScope.launch {
+        if (_state.value.search?.searching == true) return // list stays clickable during a download
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
             updateSearch { it.copy(searching = true, message = null) }
-            runCatching {
+            try {
                 val vtt = SubtitleConverter.toVtt(openSubtitles.download(result.fileId), result.name)
-                SubtitleTrack(result.name, vtt, result.language.take(2).ifBlank { "en" })
-            }.fold(
-                onSuccess = { track ->
-                    setSubtitle(track)
-                    closeSearch()
-                },
-                onFailure = { e -> updateSearch { it.copy(searching = false, message = "Download failed: ${e.message}") } },
-            )
+                setSubtitle(SubtitleTrack(result.name, vtt, result.language.take(2).ifBlank { "en" }))
+                closeSearch()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                updateSearch { it.copy(searching = false, message = "Download failed: ${e.message}") }
+            }
         }
     }
 
@@ -162,8 +186,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun startCasting() {
         val current = _state.value
         val video = current.video ?: return _state.update { it.copy(status = "Pick a video first") }
+        if (video.sizeBytes <= 0) {
+            return _state.update { it.copy(status = "Video size unknown — pick it via a different provider") }
+        }
+        val player = castPlayer
+            ?: return _state.update { it.copy(status = "Google Cast is unavailable on this device") }
         viewModelScope.launch {
-            runCatching {
+            try {
                 val (ip, server) = withContext(Dispatchers.IO) {
                     (localIpv4() ?: error("No Wi-Fi/LAN address found")) to ServerHolder.ensureStarted(app)
                 }
@@ -171,38 +200,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 server.video = MediaServer.Video(video.uri, video.mime, video.sizeBytes)
                 server.subtitleVtt = current.subtitle?.vtt
                 val base = "http://$ip:${server.port}"
-                castPlayer.load(
+                player.load(
                     videoUrl = base + MediaServer.VIDEO_PATH,
                     mime = video.mime,
                     title = video.name,
                     subtitleUrl = current.subtitle?.let { base + MediaServer.SUBTITLE_PATH },
                     subtitleLanguage = current.subtitle?.language ?: "en",
                 )
-            }.fold(
-                onSuccess = { _state.update { it.copy(status = null) } },
-                onFailure = { e ->
-                    // Nothing is being cast — don't leave the service holding locks.
-                    StreamingService.stop(app)
-                    _state.update { it.copy(status = "Cast failed: ${e.message}") }
-                },
-            )
+                _state.update { it.copy(status = null) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Clean up only when idle — a still-playing previous cast keeps its server.
+                if (!_state.value.cast.hasMedia) StreamingService.stop(app)
+                _state.update { it.copy(status = "Cast failed: ${e.message}") }
+            }
         }
     }
 
-    fun togglePlayPause() = castPlayer.togglePlayPause()
+    fun togglePlayPause() {
+        castPlayer?.togglePlayPause()
+    }
 
-    fun seekBy(deltaMs: Long) = castPlayer.seekBy(deltaMs)
+    fun seekBy(deltaMs: Long) {
+        castPlayer?.seekBy(deltaMs)
+    }
 
     fun seekToFraction(fraction: Float) {
+        val player = castPlayer ?: return
         val duration = _state.value.cast.durationMs.takeIf { it > 0 } ?: return
         val target = (duration * fraction).toLong()
-        castPlayer.seekTo(target)
+        player.seekTo(target)
         // Optimistic position so the thumb doesn't snap back while the receiver seeks.
         _state.update { it.copy(cast = it.cast.copy(positionMs = target)) }
     }
 
     fun stopCasting() {
-        castPlayer.stop()
+        castPlayer?.stop()
         StreamingService.stop(app)
     }
 }
@@ -212,7 +246,7 @@ private fun ContentResolver.describeVideo(uri: Uri): VideoFile {
     return VideoFile(
         uri = uri,
         name = name,
-        sizeBytes = querySize(uri),
+        sizeBytes = videoSize(uri),
         mime = getType(uri)?.takeIf { it.startsWith("video/") } ?: name.videoMime(),
     )
 }
@@ -220,8 +254,12 @@ private fun ContentResolver.describeVideo(uri: Uri): VideoFile {
 private fun ContentResolver.displayName(uri: Uri): String? =
     queryColumn(uri, OpenableColumns.DISPLAY_NAME) { it.getString(0) }
 
-private fun ContentResolver.querySize(uri: Uri): Long =
-    queryColumn(uri, OpenableColumns.SIZE) { it.getLong(0) } ?: 0L
+/** SIZE column when the provider reports it, else the opened descriptor's length. */
+private fun ContentResolver.videoSize(uri: Uri): Long =
+    queryColumn(uri, OpenableColumns.SIZE) { it.getLong(0) }?.takeIf { it > 0 }
+        ?: runCatching { openAssetFileDescriptor(uri, "r")?.use { it.length } }.getOrNull()
+            ?.takeIf { it != AssetFileDescriptor.UNKNOWN_LENGTH && it > 0 }
+        ?: 0L
 
 private fun <T> ContentResolver.queryColumn(uri: Uri, column: String, read: (Cursor) -> T): T? =
     query(uri, arrayOf(column), null, null, null)?.use { cursor ->

@@ -76,8 +76,17 @@ class MediaServer(private val context: Context, val port: Int) {
             resp.headers.add("Content-Range", "bytes */$total")
             return 416
         }
-        resp.sendHeaders(200, total, -1, null, video.mime, range) // a range flips this to 206
-        openStream(video).use { resp.sendBody(it, total, range) }
+        // Open the content before committing headers: after sendHeaders a failure
+        // can only abort the connection, not produce an error response.
+        val stream = try {
+            openStream(video)
+        } catch (_: IOException) {
+            return 404
+        }
+        stream.use {
+            resp.sendHeaders(200, total, -1, null, video.mime, range) // a range flips this to 206
+            resp.sendBody(it, total, range)
+        }
         return 0
     }
 
@@ -86,13 +95,19 @@ class MediaServer(private val context: Context, val port: Int) {
             ?: throw IOException("cannot open ${video.uri}")
 
     /**
-     * JLHTTP's range slicing calls skip() and treats 0 as failure; some
-     * DocumentsProvider streams refuse skip(), so fall back to reading.
+     * JLHTTP's range slicing calls skip() and treats 0 as failure; ContentResolver
+     * streams either refuse skip() (return 0) or, when pipe-backed, throw
+     * IOException("Illegal seek") — fall back to reading in both cases.
      */
     private class SkipByReadingInputStream(delegate: InputStream) : FilterInputStream(delegate) {
         override fun skip(n: Long): Long {
-            val skipped = super.skip(n)
-            if (skipped > 0 || n <= 0) return skipped
+            if (n <= 0) return 0
+            val skipped = try {
+                super.skip(n)
+            } catch (_: IOException) {
+                0L
+            }
+            if (skipped > 0) return skipped
             val buffer = ByteArray(minOf(n, 64L * 1024).toInt())
             val read = read(buffer)
             return if (read < 0) 0 else read.toLong()

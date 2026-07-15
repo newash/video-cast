@@ -114,6 +114,8 @@ object SubtitleConverter {
         .replace("\\N", "\n")
         .replace("\\n", "\n")
         .replace("\\h", " ")
+        // A blank line would terminate the VTT cue early ("foo\N\Nbar" drops "bar").
+        .replace(BLANK_LINES, "\n")
         .trim()
 
     private fun String.normalized(): String = replace("\r\n", "\n").replace('\r', '\n')
@@ -134,6 +136,7 @@ object SubtitleConverter {
     )
     private val ASS_TIME = Regex("""(\d{1,4}):(\d{2}):(\d{2})[.:](\d{2})""")
     private val ASS_OVERRIDE = Regex("""\{[^}]*}""")
+    private val BLANK_LINES = Regex("""\n[ \t]*(\n[ \t]*)+""")
     private val ASS_EVENTS_HEADER = Regex("""(?m)^\s*\[Events]""")
 
     // Spec-default v4+ field order, used when a malformed file omits its Format: line.

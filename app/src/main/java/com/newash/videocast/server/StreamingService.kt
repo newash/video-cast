@@ -8,6 +8,7 @@ import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.IBinder
 import android.os.PowerManager
+import java.io.IOException
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -53,7 +54,13 @@ class StreamingService : Service() {
             this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
         )
 
-        ServerHolder.ensureStarted(applicationContext)
+        try {
+            ServerHolder.ensureStarted(applicationContext)
+        } catch (_: IOException) {
+            // No ports available — the ViewModel surfaces its own error; don't crash.
+            stopSelf()
+            return START_NOT_STICKY
+        }
         wifiLock.acquire()
         wakeLock.acquire()
         // Not sticky: after process death the ViewModel state (and thus the served

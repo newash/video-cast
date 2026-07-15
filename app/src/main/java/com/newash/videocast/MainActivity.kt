@@ -80,10 +80,12 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    /** targetSdk 35 enforces edge-to-edge; keep content out from under the system bars. */
+    /** targetSdk 35 enforces edge-to-edge; keep content clear of bars and notches. */
     private fun applySystemBarInsets() =
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content)) { view, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             insets
         }
@@ -111,7 +113,7 @@ class MainActivity : AppCompatActivity() {
         }
         controls.isVisible = cast.hasMedia
         playPause.text = if (cast.playing) "⏸" else "▶"
-        time.text = "${cast.positionMs.toTimeString()} / ${cast.durationMs.toTimeString()}"
+        time.text = "${cast.positionMs.toTimeString(cast.durationMs)} / ${cast.durationMs.toTimeString()}"
         seek.takeUnless(SeekBar::isPressed)?.progress =
             if (cast.durationMs > 0) (cast.positionMs * 1000 / cast.durationMs).toInt() else 0
         statusView.run {
@@ -129,7 +131,7 @@ class MainActivity : AppCompatActivity() {
         }
         (searchDialog ?: SearchDialog(
             activity = this,
-            defaultQuery = vm.state.value.defaultQuery,
+            initial = search,
             onSearch = vm::searchSubtitles,
             onPick = vm::downloadSubtitle,
             onDismiss = vm::closeSearch,
@@ -143,7 +145,7 @@ class MainActivity : AppCompatActivity() {
 /** The OpenSubtitles search dialog — plain system AlertDialog around dialog_search.xml. */
 private class SearchDialog(
     activity: AppCompatActivity,
-    defaultQuery: String,
+    initial: SearchState,
     onSearch: (query: String, languages: String) -> Unit,
     onPick: (OpenSubtitlesClient.Result) -> Unit,
     onDismiss: () -> Unit,
@@ -167,7 +169,8 @@ private class SearchDialog(
         .show()
 
     init {
-        query.setText(defaultQuery)
+        query.setText(initial.query)
+        languages.setText(initial.languages)
         searchButton.setOnClickListener {
             onSearch(query.text.toString(), languages.text.toString().ifBlank { "en" })
         }
@@ -205,8 +208,9 @@ private fun SeekBar.onSeekReleased(action: (fraction: Float) -> Unit) =
             action(seekBar.progress / seekBar.max.coerceAtLeast(1).toFloat())
     })
 
-private fun Long.toTimeString(): String = (this / 1000).let { s ->
-    if (s >= 3600) {
+/** [precisionRef] keeps "0:05:30 / 1:40:00" aligned instead of "5:30 / 1:40:00". */
+private fun Long.toTimeString(precisionRef: Long = this): String = (this / 1000).let { s ->
+    if (maxOf(this, precisionRef) >= 3_600_000) {
         String.format(Locale.US, "%d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
     } else {
         String.format(Locale.US, "%d:%02d", s / 60, s % 60)

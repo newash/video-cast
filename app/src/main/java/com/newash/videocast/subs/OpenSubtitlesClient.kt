@@ -83,10 +83,13 @@ class OpenSubtitlesClient(private val apiKey: String) {
         val file = attributes.optJSONArray("files")?.optJSONObject(0) ?: return@mapNotNull null
         Result(
             fileId = file.optLong("file_id", -1).takeIf { it >= 0 } ?: return@mapNotNull null,
-            name = file.optString("file_name").ifBlank { attributes.optString("release", "subtitle") },
-            language = attributes.optString("language").ifBlank { "?" },
+            name = file.str("file_name").ifBlank { attributes.str("release").ifBlank { "subtitle" } },
+            language = attributes.str("language").ifBlank { "?" },
         )
     }
+
+    // Android's org.json optString() renders a JSON null as the literal "null".
+    private fun JSONObject.str(key: String): String = if (isNull(key)) "" else optString(key)
 
     private fun String.urlEncoded(): String = URLEncoder.encode(this, "UTF-8")
 

@@ -17,8 +17,7 @@ import java.net.URL
  */
 class JlhttpContractTest {
 
-    // Ephemeral: debug and release unit-test variants run concurrently in CI.
-    private val port = ServerSocket(0).use { it.localPort }
+    private var port = 0
     private lateinit var file: File
     private lateinit var server: HTTPServer
     private val body = ByteArray(1000) { (it % 251).toByte() }
@@ -26,29 +25,37 @@ class JlhttpContractTest {
     @Before
     fun startServer() {
         file = File.createTempFile("video", ".bin").apply { writeBytes(body) }
-        server = HTTPServer(port).apply {
-            getVirtualHost(null).addContext("/video", { req, resp ->
-                resp.headers.run {
-                    add("Access-Control-Allow-Origin", "*")
-                    add("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-                }
-                if (req.method == "OPTIONS") {
-                    resp.sendHeaders(204)
-                    return@addContext 0
-                }
-                val total = file.length()
-                resp.headers.add("Accept-Ranges", "bytes")
-                val range = req.getRange(total)
-                if (range != null && range[0] >= total) {
-                    resp.headers.add("Content-Range", "bytes */$total")
-                    return@addContext 416
-                }
-                resp.sendHeaders(200, total, -1, null, "video/mp4", range)
-                file.inputStream().use { resp.sendBody(it, total, range) }
-                0
-            }, "GET", "OPTIONS")
-        }
-        server.start()
+        // Ephemeral ports with a bind retry: test variants run concurrently in CI,
+        // and the probed port can be stolen before HTTPServer rebinds it.
+        val started = (1..3).firstNotNullOfOrNull {
+            val candidate = ServerSocket(0).use { it.localPort }
+            runCatching { buildServer(candidate).also(HTTPServer::start) }.getOrNull()?.to(candidate)
+        } ?: error("could not bind a test server port")
+        server = started.first
+        port = started.second
+    }
+
+    private fun buildServer(port: Int): HTTPServer = HTTPServer(port).apply {
+        getVirtualHost(null).addContext("/video", { req, resp ->
+            resp.headers.run {
+                add("Access-Control-Allow-Origin", "*")
+                add("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+            }
+            if (req.method == "OPTIONS") {
+                resp.sendHeaders(204)
+                return@addContext 0
+            }
+            val total = file.length()
+            resp.headers.add("Accept-Ranges", "bytes")
+            val range = req.getRange(total)
+            if (range != null && range[0] >= total) {
+                resp.headers.add("Content-Range", "bytes */$total")
+                return@addContext 416
+            }
+            resp.sendHeaders(200, total, -1, null, "video/mp4", range)
+            file.inputStream().use { resp.sendBody(it, total, range) }
+            0
+        }, "GET", "OPTIONS")
     }
 
     @After
