@@ -16,7 +16,12 @@ import com.google.android.gms.cast.framework.media.RemoteMediaClient
  * optional VTT text track, and transport controls. All calls must happen on
  * the main thread (a Cast SDK requirement).
  */
-class CastPlayer(context: Context, private val onSessionChanged: (connected: Boolean) -> Unit) {
+class CastPlayer(
+    context: Context,
+    private val onSessionChanged: (connected: Boolean) -> Unit,
+    /** Fired only when a session terminally ends — not on transient suspensions. */
+    private val onSessionEnded: () -> Unit,
+) {
 
     data class Progress(
         val connected: Boolean = false,
@@ -31,7 +36,10 @@ class CastPlayer(context: Context, private val onSessionChanged: (connected: Boo
     private val sessionListener = object : SessionManagerListener<CastSession> {
         override fun onSessionStarted(session: CastSession, sessionId: String) = onSessionChanged(true)
         override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) = onSessionChanged(true)
-        override fun onSessionEnded(session: CastSession, error: Int) = onSessionChanged(false)
+        override fun onSessionEnded(session: CastSession, error: Int) {
+            onSessionChanged(false)
+            onSessionEnded()
+        }
         override fun onSessionSuspended(session: CastSession, reason: Int) = onSessionChanged(false)
         override fun onSessionStarting(session: CastSession) {}
         override fun onSessionStartFailed(session: CastSession, error: Int) = onSessionChanged(false)

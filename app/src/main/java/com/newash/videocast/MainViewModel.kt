@@ -50,7 +50,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val state: StateFlow<UiState> = _state
 
     private val castPlayer by lazy {
-        CastPlayer(app) { connected -> _state.update { it.copy(cast = it.cast.copy(connected = connected)) } }
+        CastPlayer(
+            context = app,
+            onSessionChanged = { connected ->
+                _state.update { it.copy(cast = it.cast.copy(connected = connected)) }
+            },
+            // Release the server, wifi lock, and wake lock as soon as the cast
+            // session terminally ends — no battery spent after the movie.
+            onSessionEnded = { StreamingService.stop(app) },
+        )
     }
 
     private val openSubtitles = OpenSubtitlesClient(BuildConfig.OPENSUBTITLES_API_KEY)

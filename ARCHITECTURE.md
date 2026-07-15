@@ -148,8 +148,15 @@ the NanoHTTPD instance, holds a `WifiLock` (`FULL_HIGH_PERF`) and a partial
 wake lock while a session is active, and shows a minimal persistent
 notification. The Cast framework's own `MediaNotificationService` (enabled
 via `CastOptionsProvider`) provides the rich media notification with
-play/pause controls. The service starts when casting begins and stops when
-the session ends.
+play/pause controls. The service starts when casting begins and stops —
+releasing both locks and the server — as soon as the Cast session terminally
+ends (`onSessionEnded`); transient suspensions (brief Wi-Fi drops) keep it
+alive so playback can recover.
+
+Control from the TV remote needs no phone involvement: CEC commands go to
+the Chromecast and the default receiver handles play/pause/seek itself. The
+phone only sees the consequences (a seek arrives as a new Range request) and
+the app UI stays in sync by polling `RemoteMediaClient`.
 
 ## CI
 

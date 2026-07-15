@@ -28,7 +28,7 @@ every push — that's the install channel.
 ./gradlew assembleDebug
 ```
 
-Requires JDK 17+ and the Android SDK (platform 35).
+Requires JDK 21 and the Android SDK (platform 35).
 
 ### OpenSubtitles API key
 
