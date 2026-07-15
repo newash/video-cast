@@ -16,7 +16,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Test and build debug APK
-        run: ./gradlew test assembleDebug
+        run: ./gradlew test assembleDebug "-POPENSUBTITLES_API_KEY=${{ secrets.OPENSUBTITLES_API_KEY }}"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

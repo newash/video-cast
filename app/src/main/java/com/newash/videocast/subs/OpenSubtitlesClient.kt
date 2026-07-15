@@ -44,6 +44,11 @@ class OpenSubtitlesClient(private val apiKey: String) {
     }
 
     private fun request(url: String, body: String? = null): String = connect(url).run {
+        if (apiKey.isBlank()) {
+            throw IOException(
+                "No OpenSubtitles API key in this build — add the OPENSUBTITLES_API_KEY repo secret (CI) or set it in gradle.properties"
+            )
+        }
         setRequestProperty("Api-Key", apiKey)
         setRequestProperty("User-Agent", USER_AGENT)
         setRequestProperty("Accept", "application/json")

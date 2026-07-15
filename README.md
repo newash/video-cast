@@ -33,14 +33,15 @@ Requires JDK 21 and the Android SDK (platform 35).
 ### OpenSubtitles API key
 
 Subtitle search needs an API key from
-<https://www.opensubtitles.com/en/consumers>. Put it in `gradle.properties`
-(or `~/.gradle/gradle.properties` to keep it out of the repo):
+<https://www.opensubtitles.com/en/consumers>. Without one, search fails
+with a clear message (and, on OpenSubtitles' side, HTTP 403
+"You cannot consume this service"). Everything else works without it.
 
-```
-OPENSUBTITLES_API_KEY=yourKeyHere
-```
-
-Everything else works without it.
+- **CI builds (the install channel)**: add a repository secret named
+  `OPENSUBTITLES_API_KEY` (GitHub → Settings → Secrets and variables →
+  Actions), then re-run the workflow. The key is baked into the APK.
+- **Local builds**: put it in `~/.gradle/gradle.properties` (keeps it out
+  of this public repo): `OPENSUBTITLES_API_KEY=yourKeyHere`
 
 ## Testing
 
