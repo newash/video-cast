@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Must descend from AppCompat for the MediaRouter cast dialog. -->
+    <style name="Theme.VideoCast" parent="Theme.AppCompat.DayNight.NoActionBar" />
+</resources>

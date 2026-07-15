@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simple "cast" glyph: screen outline with signal arcs. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:translateX="27" android:translateY="27">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M43,6H11C8.79,6 7,7.79 7,10v6h4v-6h32v28H29v4h14c2.21,0 4,-1.79 4,-4V10C47,7.79 45.21,6 43,6zM7,42v6h6C13,44.69 10.31,42 7,42zM7,34v4c5.52,0 10,4.48 10,10h4C21,40.27 14.73,34 7,34zM7,26v4c9.94,0 18,8.06 18,18h4C29,35.85 19.15,26 7,26z" />
+    </group>
+</vector>

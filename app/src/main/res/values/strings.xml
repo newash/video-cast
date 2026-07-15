@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">VideoCast</string>
+    <string name="streaming_channel_name">Local streaming server</string>
+    <string name="streaming_notification_title">Serving video to Chromecast</string>
+    <string name="streaming_notification_text">Local HTTP server is running</string>
+    <string name="no_video">No video selected</string>
+    <string name="no_subtitles">No subtitles</string>
+    <string name="pick_video">Pick video</string>
+    <string name="pick_file">Pick file</string>
+    <string name="opensubtitles">OpenSubtitles</string>
+    <string name="cast">Cast ▶</string>
+    <string name="cast_no_session">Connect to a Chromecast first</string>
+    <string name="cast_no_video">Pick a video first</string>
+    <string name="search">Search</string>
+    <string name="search_hint">Title</string>
+    <string name="languages_hint">Languages (e.g. en,hu)</string>
+    <string name="no_results">No results — refine the title above</string>
+    <string name="close">Close</string>
+</resources>

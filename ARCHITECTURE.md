@@ -1,0 +1,211 @@
+# VideoCast — Architecture & Build Plan
+
+A minimal personal Android app: cast local video files to Chromecast with
+subtitle support. Replaces Web Video Caster for one specific workflow.
+
+## The core problem shape
+
+Chromecast (default media receiver) cannot read files off the phone. It can
+only fetch media over HTTP from a URL reachable on the LAN. So the app is
+really three cooperating pieces:
+
+1. **An HTTP server on the phone** that serves the picked video file (with
+   `Range`/206 support, or seeking breaks) and a subtitle track (with CORS
+   headers, or the receiver silently drops it).
+2. **A Cast sender** that tells the default receiver to load
+   `http://<phone-ip>:<port>/video` with a sidecar text track.
+3. **A subtitle pipeline** that turns whatever we have (local SRT/ASS, or an
+   SRT downloaded from OpenSubtitles) into WebVTT, the only sidecar format
+   the default receiver reliably renders.
+
+Everything else (UI, foreground service, notification) exists to keep those
+three alive and controllable.
+
+## Component overview
+
+```
+┌───────────────────────────── Phone ─────────────────────────────┐
+│                                                                  │
+│  MainActivity (system widgets, one render(state) fn)             │
+│   ├─ SAF pickers (video, subtitle)     MainViewModel             │
+│   ├─ Cast button (MediaRouteButton)    (single UiState flow)     │
+│   └─ transport controls ────────────► CastPlayer ────────────────┼──► Cast SDK
+│                                          │  load(MediaInfo +     │    (session,
+│  StreamingService (foreground)           │   MediaTrack[VTT])    │     RemoteMediaClient,
+│   └─ owns MediaServer (NanoHTTPD)        │                       │     media notification)
+│        GET /video      ◄─────────────────┼───────────────────────┼──◄ Chromecast fetches
+│        GET /subs.vtt   ◄─────────────────┘                       │    Range + CORS
+│                                                                  │
+│  Subtitle pipeline                                               │
+│   ├─ SubtitleConverter: SRT/ASS → WebVTT                         │
+│   └─ OpenSubtitlesClient (api.opensubtitles.com, title search)   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Package layout
+
+```
+com.newash.videocast
+├── App.kt                     Application; notification channel
+├── MainActivity.kt            system-widget UI, SAF pickers, render(UiState)
+├── MainViewModel.kt           single immutable UiState in a StateFlow (UDF)
+├── CastOptionsProvider.kt     default receiver ID + notification options
+├── cast/CastPlayer.kt         session mgmt, load w/ tracks, play/pause/seek
+├── server/HttpRange.kt        pure Range-header resolution (unit tested)
+├── server/MediaServer.kt      NanoHTTPD: /video (Range/206), /subs.vtt (CORS)
+├── server/ServerHolder.kt     process-wide server lifecycle + port fallback
+├── server/StreamingService.kt foreground service; wifi + wake locks
+├── subs/SubtitleConverter.kt  SRT/ASS/VTT detection + conversion (unit tested)
+├── subs/OpenSubtitlesClient.kt REST client: title search + anonymous download
+└── util/NetworkUtils.kt       LAN IPv4 discovery (prefer wlan)
+```
+
+## Tech choices
+
+| Concern | Choice | Why |
+|---|---|---|
+| Language / style | Kotlin, functional-leaning: single immutable `UiState`, `val`s, extensions, pure functions (I/O and server internals stay pragmatically imperative) | Compact, testable; the UI is a dumb function of state. |
+| UI | Classic Views, one XML layout of system-default widgets; unicode glyphs (▶ ⏸ ⏪ ⏩ ✕) and vector drawables only | No Compose: saves megabytes of dependencies for a one-screen app. No styling for styling's sake, no bitmaps. Activity extends `AppCompatActivity` because the MediaRouter cast dialog requires an AppCompat theme. |
+| Cast | `play-services-cast-framework` (Cast v3 sender) + default media receiver (`CC1AD845`) | The framework handles discovery, session lifecycle, the media notification, and lock-screen controls for free — that's the "Cast notification" requirement done by configuration, not code. No custom receiver to host or register. |
+| HTTP server | **NanoHTTPD 2.3.1** | See justification below. |
+| HTTP client / JSON | `HttpURLConnection` + Android's built-in `org.json` | Two REST endpoints don't justify OkHttp + a serialization library (~2 MB of APK). |
+| File access | Storage Access Framework (`ACTION_OPEN_DOCUMENT`) | No storage permissions needed on any Android version; content URIs work on scoped storage. |
+| DI / architecture framework | None | Personal app, one screen. Manual wiring in the ViewModel. |
+
+Total third-party dependency surface: NanoHTTPD (~50 KB) plus the unavoidable
+androidx/Cast libraries.
+
+### Why NanoHTTPD (the server justification)
+
+Candidates considered:
+
+- **NanoHTTPD** — one ~50 KB dependency, zero transitive deps, plain
+  blocking sockets, a single `serve()` override. Range/206 and CORS must be
+  implemented by hand, but that is ~40 lines and — crucially — we *want*
+  hand control over exactly those headers, because they are the two known
+  failure points (seek and silent subtitle drop). Used by countless cast/DLNA
+  apps for exactly this job. Downside: dormant upstream since 2020 —
+  acceptable for a LAN-only server embedded in a personal app; there is no
+  hostile-input surface beyond our own Chromecast.
+- **Ktor (CIO engine)** — modern and maintained, and `PartialContent` +
+  `CORS` plugins do the hard parts. But it pulls in a large dependency tree
+  (Ktor core, engine, coroutines wiring), slows builds, grows the APK by
+  megabytes, and its plugin abstractions get in the way when you need to
+  debug why a Chromecast rejected a specific byte-range response. Overkill
+  for two routes.
+- **Jetty / AndroidServer / http4k** — heavier still, or unmaintained on
+  Android, or not designed for embedding in an app process.
+
+Serving two fixed routes to a single well-behaved client on a LAN is the
+minimal-server use case; NanoHTTPD is the minimal server. If upstream
+dormancy ever bites, the `serve()` implementation is small enough to port to
+Ktor in an afternoon.
+
+### Serving details that make or break casting
+
+- **Range/206** (`/video`): `HttpRange.resolve()` (pure, unit-tested) maps a
+  `Range: bytes=…` header to 200/206/416; 206 responses carry
+  `Content-Range`, `Accept-Ranges: bytes`, and a stream bounded to the
+  requested window. Each request opens a fresh `ContentResolver` stream and
+  skips to the offset — Chromecast issues a new range request on every seek,
+  and open-skip is the only approach that works across all
+  `DocumentsProvider`s.
+- **CORS** (`/subs.vtt` — and harmlessly on everything): the default
+  receiver's player fetches text tracks with CORS enforced;
+  `Access-Control-Allow-Origin: *` (plus `OPTIONS` preflight handling) or
+  subs silently fail. This is baked into every response the server sends.
+- **MIME**: video content type from `ContentResolver`/extension (fallback
+  `video/mp4`); subtitles served as `text/vtt; charset=utf-8`.
+- **Fixed port with fallback** (8394, then +1 up to a few tries), bound on
+  all interfaces; URL built from the Wi-Fi interface IPv4.
+
+### Subtitle pipeline
+
+- **Conversion**: the default receiver renders only WebVTT/TTML sidecars, so
+  everything converges on VTT, generated in memory and held by the server:
+  - SRT → VTT: `WEBVTT` header, `,` → `.` in timestamps, cue text passed
+    through (basic `<i>/<b>` tags survive fine).
+  - ASS → VTT: take the `[Events]` section, use its `Format:` line for field
+    order, strip `{\...}` override tags, `\N` → newline, `H:MM:SS.cc` → VTT
+    timestamps. Styling is discarded — text-only is the stated scope.
+  - Already-VTT files pass through.
+  - Encoding: decode as UTF-8, fall back to windows-1252 when invalid
+    (covers the common legacy-SRT case).
+- **OpenSubtitles** (`api.opensubtitles.com/api/v1`, baked-in API key, no
+  login): title-query search only (`GET /subtitles?query=…&languages=…`,
+  prefilled from the cleaned filename), ordered by download count. Download
+  is `POST /download {file_id}` → temp link → fetch SRT → same conversion
+  path. Anonymous quota (5/day) is fine for personal use.
+- **Casting the track**: `MediaTrack(id=1, TYPE_TEXT, SUBTYPE_SUBTITLES,
+  contentId=http://…/subs.vtt, contentType=text/vtt)` attached to
+  `MediaInfo`, activated via `setActiveTrackIds([1])` on the load request —
+  activating at load time is far more reliable than toggling after.
+
+### Surviving screen-off
+
+`StreamingService` is a foreground service (`mediaPlayback` type) that owns
+the NanoHTTPD instance, holds a `WifiLock` (`FULL_HIGH_PERF`) and a partial
+wake lock while a session is active, and shows a minimal persistent
+notification. The Cast framework's own `MediaNotificationService` (enabled
+via `CastOptionsProvider`) provides the rich media notification with
+play/pause controls. The service starts when casting begins and stops when
+the session ends.
+
+## CI
+
+GitHub Actions (`.github/workflows/android.yml`): on every push, run the
+unit tests, build the debug APK, and upload it as a workflow artifact —
+that's the install channel for a personal app (no Play Store).
+
+## Build plan — verifiable milestones
+
+Each milestone leaves the repo in a state where something concrete can be
+checked.
+
+**M1 — Skeleton that builds.**
+Gradle project, manifest, empty activity, all dependencies resolved; CI
+workflow in place.
+✔ Verify: the Android CI workflow is green and produces an APK artifact.
+
+**M2 — File picking + HTTP server with Range.**
+SAF video picker; `StreamingService` + `MediaServer` serving `/video`.
+✔ Verify: unit tests for `HttpRange`; then pick a file on the phone and,
+from a laptop on the same LAN:
+`curl -sI http://<phone>:8394/video` shows `Accept-Ranges: bytes`;
+`curl -s -H "Range: bytes=100-199" -o /dev/null -w "%{http_code} %{size_download}"`
+prints `206 100`; and `curl` with no range returns the full byte count.
+
+**M3 — Basic casting.**
+Cast button, session management, load `/video` on the default receiver,
+play/pause/±seek buttons and a position slider.
+✔ Verify: video plays on TV; seeking works (this proves M2's ranges under
+the real client); play/pause from the app works; Cast media notification
+appears; playback continues with the phone screen off (proves the
+foreground service + locks).
+
+**M4 — Local subtitles.**
+SAF subtitle picker, SRT→VTT and ASS→VTT conversion, `/subs.vtt` with CORS,
+track attached and active at load.
+✔ Verify: unit tests for the converters (timestamps, ASS tag stripping,
+windows-1252 fallback); on-TV: subs render for an SRT and an ASS file;
+`curl -sI http://<phone>:8394/subs.vtt` shows `Access-Control-Allow-Origin: *`
+and `Content-Type: text/vtt`.
+
+**M5 — OpenSubtitles.**
+Title-query search (prefilled from the filename), result list, anonymous
+download, feed into the M4 pipeline.
+✔ Verify: search a known movie title end-to-end and see the downloaded subs
+render on TV; error paths (bad key, quota, no results) show readable
+messages.
+
+**M6 — Polish.**
+Error surfacing (no Wi-Fi, port busy, no session), remember last language,
+app icon.
+✔ Verify: manual pass through each failure path shows a readable message
+instead of a crash.
+
+## Non-goals (unchanged from the brief)
+
+Web video detection, non-Chromecast receivers, queues/playlists,
+transcoding, image-based subtitles (PGS/VobSub), Play Store publishing,
+moviehash-based subtitle lookup (title search is enough here).
