@@ -27,12 +27,11 @@ class JlhttpContractTest {
         file = File.createTempFile("video", ".bin").apply { writeBytes(body) }
         // Ephemeral ports with a bind retry: test variants run concurrently in CI,
         // and the probed port can be stolen before HTTPServer rebinds it.
-        val started = (1..3).firstNotNullOfOrNull {
+        server = (1..3).firstNotNullOfOrNull {
             val candidate = ServerSocket(0).use { it.localPort }
-            runCatching { buildServer(candidate).also(HTTPServer::start) }.getOrNull()?.to(candidate)
+            runCatching { buildServer(candidate).also(HTTPServer::start) }.getOrNull()
+                ?.also { port = candidate }
         } ?: error("could not bind a test server port")
-        server = started.first
-        port = started.second
     }
 
     private fun buildServer(port: Int): HTTPServer = HTTPServer(port).apply {

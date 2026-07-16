@@ -18,17 +18,17 @@ object ServerHolder {
     fun ensureStarted(context: Context): MediaServer {
         server?.let { return it }
         var lastError: IOException? = null
-        for (port in MediaServer.DEFAULT_PORT until MediaServer.DEFAULT_PORT + 10) {
-            try {
-                val candidate = MediaServer(context.applicationContext, port)
-                candidate.start()
-                server = candidate
-                return candidate
-            } catch (e: IOException) {
-                lastError = e
-            }
-        }
-        throw lastError ?: IOException("could not start media server")
+        val started = (MediaServer.DEFAULT_PORT until MediaServer.DEFAULT_PORT + 10)
+            .firstNotNullOfOrNull { port ->
+                try {
+                    MediaServer(context.applicationContext, port).also(MediaServer::start)
+                } catch (e: IOException) {
+                    lastError = e
+                    null
+                }
+            } ?: throw (lastError ?: IOException("could not start media server"))
+        server = started
+        return started
     }
 
     @Synchronized

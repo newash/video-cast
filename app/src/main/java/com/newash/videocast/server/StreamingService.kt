@@ -8,13 +8,13 @@ import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.IBinder
 import android.os.PowerManager
-import java.io.IOException
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.newash.videocast.App
 import com.newash.videocast.MainActivity
 import com.newash.videocast.R
+import java.io.IOException
 
 /**
  * Foreground service that keeps the HTTP server (and the Wi-Fi radio) alive
@@ -80,8 +80,9 @@ class StreamingService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 1
 
-        fun start(context: Context) =
+        fun start(context: Context) {
             ContextCompat.startForegroundService(context, Intent(context, StreamingService::class.java))
+        }
 
         fun stop(context: Context) {
             context.stopService(Intent(context, StreamingService::class.java))

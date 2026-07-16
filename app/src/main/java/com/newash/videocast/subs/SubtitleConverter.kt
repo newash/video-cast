@@ -68,8 +68,8 @@ object SubtitleConverter {
 
     fun srtToVtt(text: String): String =
         "WEBVTT\n\n" + text.normalized().replace(SRT_TIMING) { m ->
-            val g = m.groupValues
-            "${srtTime(g[1], g[2], g[3], g[4])} --> ${srtTime(g[5], g[6], g[7], g[8])}"
+            val (h1, m1, s1, ms1, h2, m2, s2, ms2) = m.destructured
+            "${srtTime(h1, m1, s1, ms1)} --> ${srtTime(h2, m2, s2, ms2)}"
         } + "\n"
 
     fun assToVtt(text: String): String {
@@ -107,7 +107,7 @@ object SubtitleConverter {
 
     // ASS times look like "0:01:02.34" (centiseconds).
     private fun String.parseAssTime(): Long? = ASS_TIME.matchEntire(trim())?.destructured
-        ?.let { (h, m, s, cs) -> ((h.toLong() * 3600 + m.toLong() * 60 + s.toLong()) * 1000) + cs.toLong() * 10 }
+        ?.let { (h, m, s, cs) -> hmsToMs(h, m, s) + cs.toLong() * 10 }
 
     private fun String.cleanAssText(): String = this
         .replace(ASS_OVERRIDE, "")
@@ -123,8 +123,11 @@ object SubtitleConverter {
     private fun ByteArray.hasPrefix(vararg prefix: Int): Boolean =
         size >= prefix.size && prefix.withIndex().all { (i, b) -> this[i] == b.toByte() }
 
+    private fun hmsToMs(h: String, m: String, s: String): Long =
+        (h.toLong() * 3600 + m.toLong() * 60 + s.toLong()) * 1000
+
     private fun srtTime(h: String, m: String, s: String, ms: String): String =
-        ((h.toLong() * 3600 + m.toLong() * 60 + s.toLong()) * 1000 + ms.padEnd(3, '0').toLong()).toVttTime()
+        (hmsToMs(h, m, s) + ms.padEnd(3, '0').toLong()).toVttTime()
 
     private fun Long.toVttTime(): String =
         "%02d:%02d:%02d.%03d".format(this / 3_600_000, this / 60_000 % 60, this / 1000 % 60, this % 1000)
@@ -134,9 +137,10 @@ object SubtitleConverter {
     private val SRT_TIMING = Regex(
         """(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})[ \t]*-->[ \t]*(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})"""
     )
+    private val ASS_TIME = Regex("""(\d{1,4}):(\d{2}):(\d{2})[.:](\d{2})""")
+
     // Literal } and ] must be escaped: Android's ICU regex rejects the bare
     // forms that the desktop JVM (and thus our unit tests) happily accepts.
-    private val ASS_TIME = Regex("""(\d{1,4}):(\d{2}):(\d{2})[.:](\d{2})""")
     private val ASS_OVERRIDE = Regex("""\{[^}]*\}""")
     private val BLANK_LINES = Regex("""\n[ \t]*(\n[ \t]*)+""")
     private val ASS_EVENTS_HEADER = Regex("""(?m)^\s*\[Events\]""")

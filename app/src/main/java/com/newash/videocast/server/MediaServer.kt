@@ -61,8 +61,9 @@ class MediaServer(private val context: Context, val port: Int) {
 
     private fun serveSubtitles(req: HTTPServer.Request, resp: HTTPServer.Response): Int {
         val bytes = (subtitleVtt ?: return 404).toByteArray(Charsets.UTF_8)
-        resp.sendHeaders(200, bytes.size.toLong(), -1, null, "text/vtt; charset=utf-8", null)
-        resp.sendBody(bytes.inputStream(), bytes.size.toLong(), null)
+        val length = bytes.size.toLong()
+        resp.sendHeaders(200, length, -1, null, "text/vtt; charset=utf-8", null)
+        resp.sendBody(bytes.inputStream(), length, null)
         return 0
     }
 

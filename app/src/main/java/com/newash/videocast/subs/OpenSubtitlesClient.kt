@@ -6,7 +6,9 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -51,12 +53,49 @@ class OpenSubtitlesClient(private val apiKey: String) {
     private inline fun <T> stage(name: String, block: () -> T): T = try {
         block()
     } catch (e: IOException) {
-        throw IOException("$name: ${e.message}")
+        throw IOException("$name: ${e.message}", e)
+    }
+
+    private fun request(url: String, body: String? = null): String {
+        if (apiKey.isBlank()) {
+            throw IOException(
+                "No OpenSubtitles API key in this build — add the OPENSUBTITLES_API_KEY repo secret (CI) or set it in gradle.properties"
+            )
+        }
+        return connect(url).run {
+            setRequestProperty("Api-Key", apiKey)
+            setRequestProperty("User-Agent", USER_AGENT)
+            setRequestProperty("Accept", "application/json")
+            body?.let {
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                outputStream.use { out -> out.write(it.toByteArray(Charsets.UTF_8)) }
+            }
+            val code = responseCode
+            val text = (if (code in 200..299) inputStream else errorStream)
+                ?.bufferedReader()?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) throw IOException("OpenSubtitles HTTP $code: ${text.take(200)}")
+            text
+        }
+    }
+
+    private fun connect(url: String): HttpURLConnection =
+        (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = READ_TIMEOUT_MS
+        }
+
+    /** A 200 with an unexpected shape is a network-layer failure to callers. */
+    private inline fun <T> parsed(block: () -> T): T = try {
+        block()
+    } catch (e: JSONException) {
+        throw IOException("unexpected OpenSubtitles response: ${e.message}", e)
     }
 
     /** Bounded read: a wrong payload behind the download link must not balloon into an OOM. */
-    private fun java.io.InputStream.readAtMost(limit: Int): ByteArray {
-        val out = java.io.ByteArrayOutputStream()
+    private fun InputStream.readAtMost(limit: Int): ByteArray {
+        val out = ByteArrayOutputStream()
         val buffer = ByteArray(64 * 1024)
         while (true) {
             val read = read(buffer)
@@ -64,42 +103,6 @@ class OpenSubtitlesClient(private val apiKey: String) {
             out.write(buffer, 0, read)
             if (out.size() > limit) throw IOException("subtitle download larger than $limit bytes")
         }
-    }
-
-    private fun request(url: String, body: String? = null): String = connect(url).run {
-        if (apiKey.isBlank()) {
-            throw IOException(
-                "No OpenSubtitles API key in this build — add the OPENSUBTITLES_API_KEY repo secret (CI) or set it in gradle.properties"
-            )
-        }
-        setRequestProperty("Api-Key", apiKey)
-        setRequestProperty("User-Agent", USER_AGENT)
-        setRequestProperty("Accept", "application/json")
-        body?.let {
-            requestMethod = "POST"
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-            outputStream.use { out -> out.write(it.toByteArray(Charsets.UTF_8)) }
-        }
-        val code = responseCode
-        val text = (if (code in 200..299) inputStream else errorStream)
-            ?.bufferedReader()?.use { it.readText() }.orEmpty()
-        if (code !in 200..299) throw IOException("OpenSubtitles HTTP $code: ${text.take(200)}")
-        text
-    }
-
-    private fun connect(url: String): HttpURLConnection =
-        (URL(url).openConnection() as HttpURLConnection).apply {
-            // Generous: the anonymous /download endpoint is known to be slow.
-            connectTimeout = 15_000
-            readTimeout = 40_000
-        }
-
-    /** A 200 with an unexpected shape is a network-layer failure to callers. */
-    private fun <T> parsed(block: () -> T): T = try {
-        block()
-    } catch (e: JSONException) {
-        throw IOException("unexpected OpenSubtitles response: ${e.message}")
     }
 
     private fun JSONArray.toResults(): List<Result> = (0 until length()).mapNotNull { i ->
@@ -121,6 +124,11 @@ class OpenSubtitlesClient(private val apiKey: String) {
     private companion object {
         const val BASE_URL = "https://api.opensubtitles.com/api/v1"
         const val MAX_SUBTITLE_BYTES = 5 * 1024 * 1024
+
+        // Generous: the anonymous /download endpoint is known to be slow.
+        const val CONNECT_TIMEOUT_MS = 15_000
+        const val READ_TIMEOUT_MS = 40_000
+
         val USER_AGENT = "VideoCast v${BuildConfig.VERSION_NAME}"
     }
 }

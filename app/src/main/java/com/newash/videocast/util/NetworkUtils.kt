@@ -9,8 +9,8 @@ import java.net.NetworkInterface
  * site-local and actually on the LAN — VPN/cellular tunnels are excluded
  * (their 10.x addresses are unreachable from the TV).
  */
-fun localIpv4(): String? = runCatching { NetworkInterface.getNetworkInterfaces()?.toList().orEmpty() }
-    .getOrDefault(emptyList())
+fun localIpv4(): String? = runCatching { NetworkInterface.getNetworkInterfaces()?.toList() }
+    .getOrNull().orEmpty()
     .filter { runCatching { it.isUp && !it.isLoopback }.getOrDefault(false) }
     .filterNot { it.name.startsWithAny("tun", "ppp", "rmnet") }
     .sortedBy { if (it.name.startsWithAny("wlan", "ap", "swlan")) 0 else 1 }

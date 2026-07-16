@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical">
@@ -42,8 +43,6 @@
             <TextView
                 android:id="@+id/step_video"
                 style="@style/SectionHeader"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
                 android:text="@string/step_video" />
 
             <TextView
@@ -65,8 +64,6 @@
             <TextView
                 android:id="@+id/step_subtitles"
                 style="@style/SectionHeader"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
                 android:text="@string/step_subtitles" />
 
             <LinearLayout
@@ -119,8 +116,6 @@
             <TextView
                 android:id="@+id/step_chromecast"
                 style="@style/SectionHeader"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
                 android:text="@string/step_chromecast" />
 
             <TextView
@@ -146,7 +141,6 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:paddingVertical="4dp"
-            android:textSize="15sp"
             android:visibility="gone" />
 
         <LinearLayout
@@ -177,7 +171,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:minHeight="48dp"
-                android:paddingVertical="12dp"
+                android:paddingVertical="8dp"
                 android:max="1000" />
 
             <TextView
@@ -187,7 +181,7 @@
                 android:layout_gravity="center_horizontal"
                 android:fontFeatureSettings="tnum"
                 android:textSize="18sp"
-                android:text="0:00 / 0:00" />
+                tools:text="0:00 / 0:00" />
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -219,13 +213,11 @@
                 <Button
                     android:id="@+id/rewind"
                     style="@style/TransportButton"
-                    android:layout_width="wrap_content"
                     android:text="↺10" />
 
                 <Button
                     android:id="@+id/play_pause"
                     style="@style/TransportButton"
-                    android:layout_width="wrap_content"
                     android:minWidth="96dp"
                     android:textSize="28sp"
                     android:text="▶" />
@@ -233,14 +225,12 @@
                 <Button
                     android:id="@+id/forward"
                     style="@style/TransportButton"
-                    android:layout_width="wrap_content"
                     android:text="30↻" />
 
                 <!-- Stop is destructive: quarantined from the skip cluster. -->
                 <Button
                     android:id="@+id/stop"
                     style="@style/TransportButton"
-                    android:layout_width="wrap_content"
                     android:layout_marginStart="24dp"
                     android:textColor="?attr/colorError"
                     android:text="■" />

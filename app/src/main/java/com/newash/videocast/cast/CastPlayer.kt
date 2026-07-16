@@ -42,6 +42,12 @@ class CastPlayer(
 
     private val castContext: CastContext = CastContext.getSharedInstance(context.applicationContext)
 
+    private val session: CastSession?
+        get() = castContext.sessionManager.currentCastSession
+
+    private val remote: RemoteMediaClient?
+        get() = session?.remoteMediaClient
+
     private val sessionListener = object : SessionManagerListener<CastSession> {
         override fun onSessionEnded(session: CastSession, error: Int) = onSessionTerminated()
         override fun onSessionStartFailed(session: CastSession, error: Int) = onSessionTerminated()
@@ -61,12 +67,6 @@ class CastPlayer(
     /** Detach from the process-wide CastContext (the ViewModel is being destroyed). */
     fun release() =
         castContext.sessionManager.removeSessionManagerListener(sessionListener, CastSession::class.java)
-
-    private val session: CastSession?
-        get() = castContext.sessionManager.currentCastSession
-
-    private val remote: RemoteMediaClient?
-        get() = session?.remoteMediaClient
 
     fun load(
         videoUrl: String,
@@ -147,7 +147,7 @@ class CastPlayer(
             positionMs = client?.approximateStreamPosition ?: 0,
             durationMs = client?.streamDuration ?: 0,
             deviceName = session?.castDevice?.friendlyName,
-            volume = (session?.takeIf { it.isConnected }?.let { runCatching { it.volume }.getOrNull() } ?: 0.0).toFloat(),
+            volume = session?.takeIf { it.isConnected }?.runCatching { volume }?.getOrNull()?.toFloat() ?: 0f,
         )
     }
 

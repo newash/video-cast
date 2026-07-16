@@ -63,10 +63,13 @@ class SubtitleConverterTest {
             SubtitleConverter.Format.ASS,
             SubtitleConverter.detectFormat("[Script Info]\nTitle: t\n", "x.txt"),
         )
-        assertEquals(
-            SubtitleConverter.Format.SRT,
-            SubtitleConverter.detectFormat("1\n00:00:01,000 --> 00:00:02,000\nHi", "x.srt"),
-        )
+    }
+
+    @Test
+    fun `format detection falls back to extension`() {
+        assertEquals(SubtitleConverter.Format.SRT, SubtitleConverter.detectFormat("no signature", "x.srt"))
+        assertEquals(SubtitleConverter.Format.ASS, SubtitleConverter.detectFormat("no signature", "x.ass"))
+        assertEquals(SubtitleConverter.Format.VTT, SubtitleConverter.detectFormat("no signature", "x.vtt"))
     }
 
     @Test
