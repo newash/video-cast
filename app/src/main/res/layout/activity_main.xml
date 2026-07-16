@@ -244,14 +244,5 @@
             android:layout_height="wrap_content"
             android:enabled="false"
             android:text="@string/play_on_tv" />
-
-        <TextView
-            android:id="@+id/version_footer"
-            style="@style/Caption"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:paddingTop="4dp"
-            tools:text="2026.07.16-r19 (c1451d8)" />
     </LinearLayout>
 </LinearLayout>
