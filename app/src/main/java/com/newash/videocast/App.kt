@@ -4,12 +4,15 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import androidx.appcompat.app.AppCompatDelegate
 import java.io.File
 
 class App : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // DayNight defaults to this, but pin it: the app tracks the system theme.
+        AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(
                 STREAMING_CHANNEL_ID,

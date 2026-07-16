@@ -78,6 +78,7 @@ class MainActivity : AppCompatActivity() {
             introShown = true
             IntroductoryOverlay.Builder(this, castIcon)
                 .setTitleText(getString(R.string.intro_overlay))
+                .setOverlayColor(R.color.cast_intro_scrim)
                 .setSingleTime()
                 .build()
                 .show()
