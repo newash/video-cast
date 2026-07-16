@@ -142,6 +142,20 @@ Candidates considered:
   prefilled from the cleaned filename), ordered by download count. Download
   is `POST /download {file_id}` → temp link → fetch SRT → same conversion
   path. Anonymous quota (5/day) is fine for personal use.
+- **Embedded tracks**: the receiver never demuxes subtitles from progressive
+  files, so embedded text tracks are extracted on the phone and served as the
+  sidecar like any other source. MP4 (tx3g timed text) goes through the
+  platform `MediaExtractor` — sample-table driven, reads only the text
+  track's bytes. MKV needs `MkvSubtitles`, a ~300-line hand-rolled EBML
+  walker (SRT/ASS/VTT codecs, track language + title), because Android's
+  Matroska extractor enumerates only video and audio tracks — subtitle
+  tracks are silently dropped, on every Android version. The walker
+  read-skips non-subtitle blocks below a seek threshold so network-backed
+  SAF files stream mostly sequentially instead of forcing remote reopens.
+  Cheap header probe at pick time decides whether the "In video" button
+  lights up; extraction happens only when a track is chosen. The last used
+  subtitle language (one value, shared with OpenSubtitles search) is the
+  only persisted preference.
 - **Casting the track**: `MediaTrack(id=1, TYPE_TEXT, SUBTYPE_SUBTITLES,
   contentId=http://…/subs.vtt, contentType=text/vtt)` attached to
   `MediaInfo`, activated via `setActiveTrackIds([1])` on the load request —

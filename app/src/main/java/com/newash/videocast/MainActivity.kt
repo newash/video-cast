@@ -52,6 +52,7 @@ class MainActivity : AppCompatActivity() {
     private val subtitleName by lazy { findViewById<TextView>(R.id.subtitle_name) }
     private val clearSubtitle by lazy { findViewById<Button>(R.id.clear_subtitle) }
     private val searchSubtitles by lazy { findViewById<Button>(R.id.search_subtitles) }
+    private val embeddedSubtitles by lazy { findViewById<Button>(R.id.embedded_subtitles) }
     private val stepChromecast by lazy { findViewById<TextView>(R.id.step_chromecast) }
     private val deviceStatus by lazy { findViewById<TextView>(R.id.device_status) }
     private val statusView by lazy { findViewById<TextView>(R.id.status) }
@@ -100,6 +101,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.pick_subtitle).onClick { pickSubtitle.launch(arrayOf("*/*")) }
         findViewById<View>(R.id.stop).onClick(vm::stopCasting)
         searchSubtitles.onClick(vm::openSearch)
+        embeddedSubtitles.onClick(::showEmbeddedTracksDialog)
         clearSubtitle.onClick(vm::clearSubtitle)
         playOnTvButton.onClick(vm::startCasting)
         playPause.onClick(vm::togglePlayPause)
@@ -150,9 +152,13 @@ class MainActivity : AppCompatActivity() {
         videoName.text = video?.let { "${it.name} (${it.sizeBytes.toHumanSize()})" }
             ?: getString(R.string.no_video)
         stepSubtitles.text = getString(R.string.step_subtitles).withCheck(subtitle != null)
-        subtitleName.text = subtitle?.name ?: getString(R.string.no_subtitles)
+        subtitleName.text = when {
+            extracting -> getString(R.string.extracting_subtitles)
+            else -> subtitle?.name ?: getString(R.string.no_subtitles)
+        }
         clearSubtitle.isVisible = subtitle != null
         searchSubtitles.isEnabled = video != null
+        embeddedSubtitles.isEnabled = embeddedTracks.isNotEmpty() && !extracting
         stepChromecast.text = getString(R.string.step_chromecast).withCheck(cast.connected)
         deviceStatus.text = when {
             cast.connected -> cast.deviceName ?: getString(R.string.connecting)
@@ -202,6 +208,17 @@ class MainActivity : AppCompatActivity() {
             else -> getString(R.string.ready_to, state.cast.deviceName ?: "Chromecast") to false
         }
         statusView.showMessage(text, isError, errorColor, neutralStatusColors)
+    }
+
+    private fun showEmbeddedTracksDialog() {
+        val tracks = vm.state.value.embeddedTracks.ifEmpty { return }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.embedded_dialog_title)
+            .setItems(tracks.map { it.label }.toTypedArray()) { _, index ->
+                tracks.getOrNull(index)?.let(vm::pickEmbeddedTrack)
+            }
+            .setNegativeButton(R.string.close, null)
+            .show()
     }
 
     private fun showCrashDialog(stack: String) {

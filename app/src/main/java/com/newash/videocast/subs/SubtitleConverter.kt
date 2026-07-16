@@ -88,6 +88,23 @@ object SubtitleConverter {
             }
     }
 
+    /** A single subtitle cue with absolute times — the unit embedded-track extraction produces. */
+    data class Cue(val startMs: Long, val endMs: Long, val text: String)
+
+    fun cuesToVtt(cues: List<Cue>): String = cues
+        .filter { it.text.isNotBlank() && it.endMs > it.startMs }
+        .sortedBy(Cue::startMs)
+        .joinToString(separator = "\n\n", prefix = "WEBVTT\n\n", postfix = "\n") { cue ->
+            "${cue.startMs.toVttTime()} --> ${cue.endMs.toVttTime()}\n${cue.text}"
+        }
+
+    /**
+     * MKV ASS/SSA block payload — "ReadOrder,Layer,Style,Name,MarginL,MarginR,
+     * MarginV,Effect,Text" (timing lives in the block, not the payload) — → text.
+     */
+    fun assEventToText(payload: String): String =
+        payload.split(",", limit = 9).getOrNull(8)?.cleanAssText().orEmpty()
+
     private data class AssCue(val startMs: Long, val endMs: Long, val text: String)
 
     private fun String.toAssCue(fields: List<String>): AssCue? {

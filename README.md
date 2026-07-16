@@ -12,10 +12,22 @@ milestone build plan.
 - Pick a local video (Storage Access Framework), serve it from an embedded
   HTTP server (JLHTTP, with Range/206 for seeking), and cast it via the
   Google Cast sender SDK to the default receiver.
-- Subtitles: pick a local SRT/ASS file, or search OpenSubtitles by title
-  (anonymous downloads). Everything is converted to WebVTT and served with
-  CORS headers — the only way the default receiver renders sidecar text
-  tracks.
+- Subtitles: pick a local SRT/ASS file, search OpenSubtitles by title
+  (anonymous downloads), or choose a text track embedded in the video itself
+  (SRT/ASS in MKV via a built-in parser, timed text in MP4). Everything is
+  converted to WebVTT and served with CORS headers — the only way the
+  default receiver renders sidecar text tracks. The last used subtitle
+  language is remembered across all sources.
+- NAS streaming without any app changes: install
+  [RSAF](https://github.com/chenxiaolong/RSAF) and the NAS appears in the
+  system file picker; VideoCast streams straight from it. Working Synology
+  FTPS recipe — remote options `explicit_tls=true`, `shut_timeout=5s`,
+  `close_timeout=5s`, `idle_timeout=5m` (+ `no_check_certificate=true` for a
+  self-signed cert), and RSAF per-remote "Custom VFS options"
+  `vfs_read_chunk_size=off`, `vfs_cache_mode=full`, `vfs_cache_max_age=1h`.
+  Without the timeout/chunking tweaks, seeks stall for up to a minute
+  (FTP aborts wait out the server's close status; the mobile-tuned chunking
+  reopens a TLS data connection every 8 MiB).
 - Play/pause/seek controls, Cast media notification, and a foreground
   service so the server survives screen-off.
 

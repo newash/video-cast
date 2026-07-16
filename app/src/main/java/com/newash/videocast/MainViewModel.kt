@@ -2,6 +2,7 @@ package com.newash.videocast
 
 import android.app.Application
 import android.content.ContentResolver
+import android.content.Context
 import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.net.Uri
@@ -12,6 +13,7 @@ import com.newash.videocast.cast.CastPlayer
 import com.newash.videocast.server.MediaServer
 import com.newash.videocast.server.ServerHolder
 import com.newash.videocast.server.StreamingService
+import com.newash.videocast.subs.EmbeddedSubtitles
 import com.newash.videocast.subs.OpenSubtitlesClient
 import com.newash.videocast.subs.SubtitleConverter
 import com.newash.videocast.util.localIpv4
@@ -57,6 +59,10 @@ data class UiState(
     val castSubtitle: String? = null,
     /** null = search dialog closed. */
     val search: SearchState? = null,
+    /** Text subtitle tracks found inside the picked video. */
+    val embeddedTracks: List<EmbeddedSubtitles.Track> = emptyList(),
+    /** An embedded track is being extracted from the container. */
+    val extracting: Boolean = false,
 ) {
     val defaultQuery: String get() = video?.name?.toSearchQuery().orEmpty()
     val subtitleDirty: Boolean get() = cast.hasMedia && subtitle?.name != castSubtitle
@@ -79,6 +85,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val openSubtitles = OpenSubtitlesClient(BuildConfig.OPENSUBTITLES_API_KEY)
 
     private var searchJob: Job? = null
+    private var probeJob: Job? = null
+
+    private val prefs get() = app.getSharedPreferences("videocast", Context.MODE_PRIVATE)
+
+    /** One remembered subtitle language, shared by OpenSubtitles search and embedded tracks. */
+    private var rememberedLanguages: String
+        get() = prefs.getString(PREF_SUBTITLE_LANGUAGES, null)?.takeIf { it.isNotBlank() } ?: "en"
+        set(value) {
+            value.takeIf { it.isNotBlank() }?.let { prefs.edit().putString(PREF_SUBTITLE_LANGUAGES, it).apply() }
+        }
+
+    /** First language of the remembered list, as a two-letter cast track tag. */
+    private val rememberedLanguageTag: String
+        get() = rememberedLanguages.substringBefore(',').trim().take(2).lowercase().ifBlank { "en" }
 
     init {
         App.consumeLastCrash(app)?.let { crash -> _state.update { it.copy(crash = crash) } }
@@ -121,6 +141,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update {
                 it.copy(
                     video = video,
+                    embeddedTracks = emptyList(),
                     // Error prevention beats error reporting: warn at pick time.
                     note = if (video.sizeBytes <= 0) {
                         Note("Video size unknown — casting will fail; pick it via a different provider")
@@ -128,6 +149,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         null
                     },
                 )
+            }
+            probeEmbeddedTracks(uri)
+        }
+    }
+
+    /** Container-header probe: cheap even for network files, so failures stay silent. */
+    private fun probeEmbeddedTracks(uri: Uri) {
+        probeJob?.cancel()
+        probeJob = viewModelScope.launch {
+            val preferred = rememberedLanguageTag
+            val tracks = withContext(Dispatchers.IO) {
+                runCatching { EmbeddedSubtitles.listTracks(app, uri) }.getOrDefault(emptyList())
+            }.sortedByDescending { it.language?.startsWith(preferred) == true }
+            // Only annotate the still-current video (picks can race the probe).
+            _state.update { if (it.video?.uri == uri) it.copy(embeddedTracks = tracks) else it }
+        }
+    }
+
+    fun pickEmbeddedTrack(track: EmbeddedSubtitles.Track) {
+        val video = _state.value.video ?: return
+        viewModelScope.launch {
+            _state.update { it.copy(extracting = true) }
+            reporting({ e ->
+                _state.update { it.copy(extracting = false, note = Note("Extraction failed: ${e.message}")) }
+            }) {
+                val vtt = withContext(Dispatchers.IO) { EmbeddedSubtitles.extractVtt(app, video.uri, track) }
+                track.language?.let { rememberedLanguages = it }
+                _state.update { it.copy(extracting = false) }
+                applySubtitle(SubtitleTrack(track.label, vtt, track.language?.take(2) ?: rememberedLanguageTag))
             }
         }
     }
@@ -139,7 +189,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val name = app.contentResolver.displayName(uri) ?: "subtitle"
                     val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                         ?: error("cannot read subtitle file")
-                    SubtitleTrack(name, SubtitleConverter.toVtt(bytes, name), language = "en")
+                    SubtitleTrack(name, SubtitleConverter.toVtt(bytes, name), rememberedLanguageTag)
                 }
                 applySubtitle(track)
             }
@@ -150,8 +200,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openSearch() {
         val query = _state.value.defaultQuery
-        _state.update { it.copy(search = SearchState(query = query)) }
-        searchSubtitles(query, "en")
+        val languages = rememberedLanguages
+        _state.update { it.copy(search = SearchState(query = query, languages = languages)) }
+        searchSubtitles(query, languages)
     }
 
     fun closeSearch() {
@@ -169,6 +220,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         searchJob?.cancel() // a stale response must not paint into a newer dialog generation
+        rememberedLanguages = languages
         searchJob = viewModelScope.launch {
             updateSearch { it.copy(searching = true, message = null, query = query, languages = languages) }
             reporting({ e ->
@@ -272,6 +324,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun stopCasting() {
         castPlayer?.stop()
         StreamingService.stop(app)
+    }
+
+    private companion object {
+        const val PREF_SUBTITLE_LANGUAGES = "subtitle_languages"
     }
 }
 
