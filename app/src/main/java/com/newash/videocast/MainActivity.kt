@@ -94,6 +94,7 @@ class MainActivity : AppCompatActivity() {
         applySystemBarInsets()
         CastButtonFactory.setUpMediaRouteButton(this, castIcon)
         sharedCastContext?.addCastStateListener(castStateListener)
+        findViewById<TextView>(R.id.version_footer).text = BuildConfig.VERSION_NAME
         if (savedInstanceState == null) requestNotificationPermissionOnce()
 
         findViewById<View>(R.id.pick_video).onClick { pickVideo.launch(arrayOf("video/*")) }

@@ -24,7 +24,13 @@ class App : Application() {
         // show what happened instead of a bare "the app closed".
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, e ->
-            runCatching { crashFile(this).writeText(e.stackTraceToString()) }
+            // Stamped with the build that crashed: the file can outlive an update.
+            runCatching {
+                crashFile(this).writeText(
+                    "VideoCast ${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})\n" +
+                        e.stackTraceToString()
+                )
+            }
             previous?.uncaughtException(thread, e)
         }
     }

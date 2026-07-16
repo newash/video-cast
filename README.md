@@ -19,8 +19,14 @@ milestone build plan.
 - Play/pause/seek controls, Cast media notification, and a foreground
   service so the server survives screen-off.
 
-CI (GitHub Actions) runs the unit tests and uploads a debug APK artifact on
-every push — that's the install channel.
+CI (GitHub Actions) runs the unit tests on every push and publishes the APK
+to the rolling ["latest" release](../../releases/tag/latest) — that's the
+install channel (a permanent tap-to-download link, unlike workflow artifacts,
+which expire and require a login). Versions derive from git: versionCode is
+the commit count, versionName is `<commit date>-r<count> (<sha>)`. Builds are
+signed with the committed `debug.keystore` so each APK installs over the
+previous one; a debug key confers no authority, which is why committing it
+is an acceptable personal-app tradeoff.
 
 ## Building
 
