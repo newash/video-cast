@@ -4,20 +4,38 @@
     <string name="streaming_channel_name">Local streaming server</string>
     <string name="streaming_notification_title">Serving video to Chromecast</string>
     <string name="streaming_notification_text">Local HTTP server is running</string>
-    <string name="section_video">🎬 Video</string>
-    <string name="section_subtitles">💬 Subtitles</string>
+
+    <string name="step_video">1 · Video</string>
+    <string name="step_subtitles">2 · Subtitles · optional</string>
+    <string name="step_chromecast">3 · Chromecast</string>
+
     <string name="no_video">No video selected</string>
-    <string name="no_subtitles">No subtitles</string>
+    <string name="no_subtitles">None</string>
     <string name="pick_video">Pick video</string>
     <string name="pick_file">Pick file</string>
     <string name="opensubtitles">OpenSubtitles</string>
-    <string name="cast">Cast ▶</string>
-    <string name="cast_no_session">Connect to a Chromecast first</string>
-    <string name="cast_no_video">Pick a video first</string>
+    <string name="clear_subtitle">Remove subtitle</string>
+
+    <string name="not_connected">Not connected — tap the cast icon above</string>
+    <string name="connecting">Connecting…</string>
+
+    <string name="play_on_tv">▶ Play on TV</string>
+    <string name="recast_subtitles">↻ Re-cast with new subtitles</string>
+    <string name="ready_pick_video">Pick a video first</string>
+    <string name="ready_connect">Connect to a Chromecast (cast icon top right)</string>
+    <string name="loading_on_tv">Loading on TV…</string>
+    <string name="ready_to">Ready — %1$s</string>
+    <string name="buffering">Buffering…</string>
+    <string name="crash_notice">App crashed last time — tap for details</string>
+    <string name="volume">Vol</string>
+
     <string name="search">Search</string>
-    <string name="search_hint">Title</string>
-    <string name="languages_hint">Languages (e.g. en,hu)</string>
+    <string name="search_label">Title</string>
+    <string name="search_hint">e.g. Tuner 2025</string>
+    <string name="languages_label">Languages</string>
+    <string name="languages_hint">e.g. en,hu</string>
     <string name="no_results">No results — refine the title above</string>
-    <string name="leftover_media_hint">Controlling media from a previous cast — ■ stops it</string>
     <string name="close">Close</string>
+    <string name="leftover_media_hint">Controlling media from a previous cast — seeking unavailable, ■ stops it</string>
+    <string name="intro_overlay">Tap here to connect to your Chromecast</string>
 </resources>

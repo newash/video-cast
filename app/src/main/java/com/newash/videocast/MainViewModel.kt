@@ -30,11 +30,15 @@ data class VideoFile(val uri: Uri, val name: String, val sizeBytes: Long, val mi
 
 data class SubtitleTrack(val name: String, val vtt: String, val language: String)
 
+/** A user-facing message with a severity — errors render in the error color. */
+data class Note(val text: String, val error: Boolean = true)
+
 data class SearchState(
     val results: List<OpenSubtitlesClient.Result> = emptyList(),
     val searching: Boolean = false,
-    /** Error or empty-result message shown inside the dialog. */
+    /** Error / progress / empty-result message shown inside the dialog. */
     val message: String? = null,
+    val messageIsError: Boolean = false,
     /** Last submitted (or prefilled) inputs — survive dialog recreation on rotation. */
     val query: String = "",
     val languages: String = "en",
@@ -44,11 +48,18 @@ data class UiState(
     val video: VideoFile? = null,
     val subtitle: SubtitleTrack? = null,
     val cast: CastPlayer.Progress = CastPlayer.Progress(),
-    val status: String? = null,
+    val note: Note? = null,
+    /** Full stack of the previous run's crash; shown as a tappable one-liner. */
+    val crash: String? = null,
+    /** Cast pressed, receiver hasn't reported media yet. */
+    val loading: Boolean = false,
+    /** Subtitle name active on the receiver — drives the re-cast affordance. */
+    val castSubtitle: String? = null,
     /** null = search dialog closed. */
     val search: SearchState? = null,
 ) {
     val defaultQuery: String get() = video?.name?.toSearchQuery().orEmpty()
+    val subtitleDirty: Boolean get() = cast.hasMedia && subtitle?.name != castSubtitle
 }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -70,14 +81,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var searchJob: Job? = null
 
     init {
-        App.consumeLastCrash(app)?.let { crash ->
-            // Exception headers and Caused-by lines carry the signal; frames don't.
-            val summary = crash.lineSequence()
-                .filterNot { line -> line.trimStart().startsWith("at ") }
-                .take(6)
-                .joinToString("\n")
-            _state.update { it.copy(status = "Previous crash:\n$summary") }
-        }
+        App.consumeLastCrash(app)?.let { crash -> _state.update { it.copy(crash = crash) } }
         // The Cast SDK requires main-thread access; poll instead of juggling
         // per-session progress listeners. Skip the work while nothing collects
         // (screen off / app backgrounded).
@@ -85,7 +89,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val player = castPlayer ?: return@launch
             while (isActive) {
                 if (_state.subscriptionCount.value > 0) {
-                    runCatching(player::progress).onSuccess { p -> _state.update { it.copy(cast = p) } }
+                    runCatching(player::progress).onSuccess { p ->
+                        _state.update { it.copy(cast = p, loading = it.loading && !p.hasMedia) }
+                    }
                 }
                 delay(500)
             }
@@ -96,11 +102,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         castPlayer?.release()
     }
 
+    fun dismissCrash() = _state.update { it.copy(crash = null) }
+
     fun onVideoPicked(uri: Uri) {
         viewModelScope.launch {
             // DocumentsProvider queries are cross-process IPC — keep them off Main.
             val video = withContext(Dispatchers.IO) { app.contentResolver.describeVideo(uri) }
-            _state.update { it.copy(video = video, status = null) }
+            _state.update {
+                it.copy(
+                    video = video,
+                    // Error prevention beats error reporting: warn at pick time.
+                    note = Note("Video size unknown — casting will fail; pick it via a different provider")
+                        .takeIf { _ -> video.sizeBytes <= 0 },
+                )
+            }
         }
     }
 
@@ -117,14 +132,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _state.update { it.copy(status = "Subtitle error: ${e.message}") }
+                _state.update { it.copy(note = Note("Subtitle error: ${e.message}")) }
             }
         }
     }
 
     fun clearSubtitle() {
         ServerHolder.server?.subtitleVtt = null
-        _state.update { it.copy(subtitle = null, status = null) }
+        _state.update { it.copy(subtitle = null, note = null) }
     }
 
     fun openSearch() {
@@ -143,7 +158,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(search = it.search?.let(transform)) }
 
     fun searchSubtitles(query: String, languages: String) {
-        if (query.isBlank()) return
+        if (query.isBlank()) {
+            updateSearch { it.copy(message = "Enter a title to search", messageIsError = false) }
+            return
+        }
         searchJob?.cancel() // a stale response must not paint into a newer dialog generation
         searchJob = viewModelScope.launch {
             updateSearch { it.copy(searching = true, message = null, query = query, languages = languages) }
@@ -154,12 +172,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         results = results,
                         searching = false,
                         message = app.getString(R.string.no_results).takeIf { _ -> results.isEmpty() },
+                        messageIsError = false,
                     )
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                updateSearch { it.copy(searching = false, message = "Search failed: ${e.message}") }
+                updateSearch { it.copy(searching = false, message = "Search failed: ${e.message}", messageIsError = true) }
             }
         }
     }
@@ -168,7 +187,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_state.value.search?.searching == true) return // list stays clickable during a download
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            updateSearch { it.copy(searching = true, message = null) }
+            updateSearch { it.copy(searching = true, message = "Downloading ${result.name}…", messageIsError = false) }
             try {
                 val track = withContext(Dispatchers.IO) {
                     val vtt = SubtitleConverter.toVtt(openSubtitles.download(result.fileId), result.name)
@@ -179,30 +198,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                updateSearch { it.copy(searching = false, message = "Download failed: ${e.message}") }
+                updateSearch { it.copy(searching = false, message = "Download failed: ${e.message}", messageIsError = true) }
             }
         }
     }
 
     private fun setSubtitle(track: SubtitleTrack) {
         ServerHolder.server?.subtitleVtt = track.vtt
-        _state.update {
-            it.copy(
-                subtitle = track,
-                status = if (it.cast.hasMedia) "Subtitle loaded — press Cast again to apply" else null,
-            )
-        }
+        // No status message: the Cast button itself turns into the re-cast
+        // affordance when the loaded subtitle differs from the cast one.
+        _state.update { it.copy(subtitle = track, note = null) }
     }
 
     fun startCasting() {
         val current = _state.value
-        val video = current.video ?: return _state.update { it.copy(status = "Pick a video first") }
-        if (video.sizeBytes <= 0) {
-            return _state.update { it.copy(status = "Video size unknown — pick it via a different provider") }
-        }
+        val video = current.video ?: return
+        if (video.sizeBytes <= 0) return
         val player = castPlayer
-            ?: return _state.update { it.copy(status = "Google Cast is unavailable on this device") }
+            ?: return _state.update { it.copy(note = Note("Google Cast is unavailable on this device")) }
         viewModelScope.launch {
+            _state.update { it.copy(loading = true, note = null) }
             try {
                 val (ip, server) = withContext(Dispatchers.IO) {
                     (localIpv4() ?: error("No Wi-Fi/LAN address found")) to ServerHolder.ensureStarted(app)
@@ -217,16 +232,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     title = video.name,
                     subtitleUrl = current.subtitle?.let { base + MediaServer.SUBTITLE_PATH },
                     subtitleLanguage = current.subtitle?.language ?: "en",
+                    onResult = ::onLoadResult,
                 )
-                _state.update { it.copy(status = null) }
+                _state.update { it.copy(castSubtitle = current.subtitle?.name) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // Clean up only when idle — a still-playing previous cast keeps its server.
-                if (!_state.value.cast.hasMedia) StreamingService.stop(app)
-                _state.update { it.copy(status = "Cast failed: ${e.message}") }
+                onLoadResult(e.message ?: "unknown error")
             }
         }
+    }
+
+    private fun onLoadResult(error: String?) {
+        if (error == null) return
+        // Clean up only when idle — a still-playing previous cast keeps its server.
+        if (!_state.value.cast.hasMedia) StreamingService.stop(app)
+        _state.update { it.copy(loading = false, note = Note("Cast failed: $error")) }
     }
 
     fun togglePlayPause() {
@@ -244,6 +265,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         player.seekTo(target)
         // Optimistic position so the thumb doesn't snap back while the receiver seeks.
         _state.update { it.copy(cast = it.cast.copy(positionMs = target)) }
+    }
+
+    fun setVolume(fraction: Float) {
+        castPlayer?.setVolume(fraction)
     }
 
     fun stopCasting() {

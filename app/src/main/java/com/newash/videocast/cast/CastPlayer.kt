@@ -8,6 +8,7 @@ import com.google.android.gms.cast.MediaSeekOptions
 import com.google.android.gms.cast.MediaTrack
 import com.google.android.gms.cast.framework.CastContext
 import com.google.android.gms.cast.framework.CastSession
+import com.google.android.gms.cast.framework.CastState
 import com.google.android.gms.cast.framework.SessionManagerListener
 import com.google.android.gms.cast.framework.media.RemoteMediaClient
 
@@ -29,10 +30,14 @@ class CastPlayer(
 
     data class Progress(
         val connected: Boolean = false,
+        val connecting: Boolean = false,
         val hasMedia: Boolean = false,
         val playing: Boolean = false,
+        val buffering: Boolean = false,
         val positionMs: Long = 0,
         val durationMs: Long = 0,
+        val deviceName: String? = null,
+        val volume: Float = 0f,
     )
 
     private val castContext: CastContext = CastContext.getSharedInstance(context.applicationContext)
@@ -57,10 +62,20 @@ class CastPlayer(
     fun release() =
         castContext.sessionManager.removeSessionManagerListener(sessionListener, CastSession::class.java)
 
-    private val remote: RemoteMediaClient?
-        get() = castContext.sessionManager.currentCastSession?.remoteMediaClient
+    private val session: CastSession?
+        get() = castContext.sessionManager.currentCastSession
 
-    fun load(videoUrl: String, mime: String, title: String, subtitleUrl: String?, subtitleLanguage: String) {
+    private val remote: RemoteMediaClient?
+        get() = session?.remoteMediaClient
+
+    fun load(
+        videoUrl: String,
+        mime: String,
+        title: String,
+        subtitleUrl: String?,
+        subtitleLanguage: String,
+        onResult: (error: String?) -> Unit,
+    ) {
         val client = checkNotNull(remote) { "No Chromecast session" }
         val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
             putString(MediaMetadata.KEY_TITLE, title)
@@ -89,7 +104,13 @@ class CastPlayer(
             // than toggling it afterwards on the default receiver.
             .setActiveTrackIds(if (subtitleUrl != null) longArrayOf(SUBTITLE_TRACK_ID) else longArrayOf())
             .build()
-        client.load(request)
+        // Receiver-side rejections must not be silent: surface the result.
+        client.load(request).setResultCallback { result ->
+            onResult(
+                if (result.status.isSuccess) null
+                else result.status.statusMessage ?: "receiver rejected the load (${result.status.statusCode})"
+            )
+        }
     }
 
     fun togglePlayPause() {
@@ -106,18 +127,27 @@ class CastPlayer(
         remote?.seek(MediaSeekOptions.Builder().setPosition(positionMs).build())
     }
 
+    fun setVolume(fraction: Float) {
+        runCatching { session?.volume = fraction.toDouble() } // throws IOException when the channel is gone
+    }
+
     fun stop() {
         remote?.stop()
     }
 
     fun progress(): Progress {
-        val client = remote
+        val session = this.session
+        val client = session?.remoteMediaClient
         return Progress(
-            connected = castContext.sessionManager.currentCastSession?.isConnected == true,
+            connected = session?.isConnected == true,
+            connecting = castContext.castState == CastState.CONNECTING,
             hasMedia = client?.hasMediaSession() == true,
             playing = client?.isPlaying == true,
+            buffering = client?.isBuffering == true,
             positionMs = client?.approximateStreamPosition ?: 0,
             durationMs = client?.streamDuration ?: 0,
+            deviceName = session?.castDevice?.friendlyName,
+            volume = (session?.takeIf { it.isConnected }?.let { runCatching { it.volume }.getOrNull() } ?: 0.0).toFloat(),
         )
     }
 

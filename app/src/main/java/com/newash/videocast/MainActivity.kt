@@ -4,7 +4,9 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.TypedValue
 import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -26,6 +28,10 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.mediarouter.app.MediaRouteButton
 import com.google.android.gms.cast.framework.CastButtonFactory
+import com.google.android.gms.cast.framework.CastContext
+import com.google.android.gms.cast.framework.CastState
+import com.google.android.gms.cast.framework.CastStateListener
+import com.google.android.gms.cast.framework.IntroductoryOverlay
 import com.newash.videocast.subs.OpenSubtitlesClient
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -38,27 +44,52 @@ class MainActivity : AppCompatActivity() {
     private val pickSubtitle = registerForActivityResult(OpenDocument()) { it?.let(vm::onSubtitlePicked) }
     private val askNotifications = registerForActivityResult(RequestPermission()) {}
 
+    private val castIcon by lazy { findViewById<MediaRouteButton>(R.id.cast_button) }
+    private val stepVideo by lazy { findViewById<TextView>(R.id.step_video) }
     private val videoName by lazy { findViewById<TextView>(R.id.video_name) }
+    private val stepSubtitles by lazy { findViewById<TextView>(R.id.step_subtitles) }
     private val subtitleName by lazy { findViewById<TextView>(R.id.subtitle_name) }
     private val clearSubtitle by lazy { findViewById<Button>(R.id.clear_subtitle) }
     private val searchSubtitles by lazy { findViewById<Button>(R.id.search_subtitles) }
-    private val castButton by lazy { findViewById<Button>(R.id.cast) }
+    private val stepChromecast by lazy { findViewById<TextView>(R.id.step_chromecast) }
+    private val deviceStatus by lazy { findViewById<TextView>(R.id.device_status) }
+    private val statusView by lazy { findViewById<TextView>(R.id.status) }
     private val controls by lazy { findViewById<View>(R.id.controls) }
     private val controlsHint by lazy { findViewById<TextView>(R.id.controls_hint) }
+    private val nowPlaying by lazy { findViewById<TextView>(R.id.now_playing) }
+    private val seek by lazy { findViewById<SeekBar>(R.id.seek) }
+    private val time by lazy { findViewById<TextView>(R.id.time) }
+    private val volumeBar by lazy { findViewById<SeekBar>(R.id.volume) }
     private val playPause by lazy { findViewById<Button>(R.id.play_pause) }
     private val rewind by lazy { findViewById<Button>(R.id.rewind) }
     private val forward by lazy { findViewById<Button>(R.id.forward) }
-    private val time by lazy { findViewById<TextView>(R.id.time) }
-    private val seek by lazy { findViewById<SeekBar>(R.id.seek) }
-    private val statusView by lazy { findViewById<TextView>(R.id.status) }
+    private val castButton by lazy { findViewById<Button>(R.id.cast) }
+
+    private val errorColor by lazy {
+        TypedValue().also { theme.resolveAttribute(androidx.appcompat.R.attr.colorError, it, true) }.data
+    }
+    private val neutralStatusColors by lazy { statusView.textColors }
 
     private var searchDialog: SearchDialog? = null
+    private var introShown = false
+    private val castStateListener = CastStateListener { state ->
+        if (state != CastState.NO_DEVICES_AVAILABLE && !introShown) {
+            introShown = true
+            IntroductoryOverlay.Builder(this, castIcon)
+                .setTitleText(getString(R.string.intro_overlay))
+                .setSingleTime()
+                .build()
+                .show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         applySystemBarInsets()
-        CastButtonFactory.setUpMediaRouteButton(this, findViewById<MediaRouteButton>(R.id.cast_button))
+        CastButtonFactory.setUpMediaRouteButton(this, castIcon)
+        runCatching { CastContext.getSharedInstance(this) }.getOrNull()
+            ?.addCastStateListener(castStateListener)
         if (savedInstanceState == null) requestNotificationPermissionOnce()
 
         onClick(R.id.pick_video) { pickVideo.launch(arrayOf("video/*")) }
@@ -70,7 +101,16 @@ class MainActivity : AppCompatActivity() {
         onClick(R.id.rewind) { vm.seekBy(-10_000) }
         onClick(R.id.forward) { vm.seekBy(30_000) }
         onClick(R.id.stop, vm::stopCasting)
-        seek.onSeekReleased(vm::seekToFraction)
+        statusView.setOnClickListener { vm.state.value.crash?.let(::showCrashDialog) }
+
+        seek.onSeek(
+            onPreview = { fraction ->
+                val duration = vm.state.value.cast.durationMs
+                if (duration > 0) time.text = timeLine((duration * fraction).toLong(), duration)
+            },
+            onCommit = vm::seekToFraction,
+        )
+        volumeBar.onSeek(onPreview = {}, onCommit = vm::setVolume)
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) { vm.state.collect(::render) }
@@ -78,6 +118,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        runCatching { CastContext.getSharedInstance(this) }.getOrNull()
+            ?.removeCastStateListener(castStateListener)
         searchDialog?.dismissSilently()
         searchDialog = null
         super.onDestroy()
@@ -101,19 +143,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun render(state: UiState) = with(state) {
+        stepVideo.text = getString(R.string.step_video).withCheck(video != null)
         videoName.text = video?.let { "${it.name} (${it.sizeBytes.toHumanSize()})" }
             ?: getString(R.string.no_video)
+        stepSubtitles.text = getString(R.string.step_subtitles).withCheck(subtitle != null)
         subtitleName.text = subtitle?.name ?: getString(R.string.no_subtitles)
         clearSubtitle.isVisible = subtitle != null
         searchSubtitles.isEnabled = video != null
-        castButton.run {
-            isEnabled = video != null && cast.connected
-            text = when {
-                !cast.connected -> getString(R.string.cast_no_session)
-                video == null -> getString(R.string.cast_no_video)
-                else -> getString(R.string.cast)
-            }
+        stepChromecast.text = getString(R.string.step_chromecast).withCheck(cast.connected)
+        deviceStatus.text = when {
+            cast.connected -> cast.deviceName ?: getString(R.string.connecting)
+            cast.connecting -> getString(R.string.connecting)
+            else -> getString(R.string.not_connected)
         }
+
+        castButton.run {
+            isEnabled = video != null && (video.sizeBytes) > 0 && cast.connected && !loading
+            text = getString(if (subtitleDirty && video != null) R.string.recast_subtitles else R.string.play_on_tv)
+        }
+
         controls.isVisible = cast.hasMedia
         // The receiver keeps its media session across app restarts; with no video
         // picked these controls steer a leftover stream whose server is gone —
@@ -122,16 +170,49 @@ class MainActivity : AppCompatActivity() {
         seek.isEnabled = video != null
         rewind.isEnabled = video != null
         forward.isEnabled = video != null
+        nowPlaying.text = listOfNotNull(video?.name, cast.deviceName?.let { "→ $it" }).joinToString("  ")
         playPause.text = if (cast.playing) "❚❚" else "▶"
-        time.text = "${cast.positionMs.toTimeString(cast.durationMs)} / ${cast.durationMs.toTimeString()}"
-        seek.takeUnless(SeekBar::isPressed)?.progress =
-            if (cast.durationMs > 0) (cast.positionMs * 1000 / cast.durationMs).toInt() else 0
-        statusView.run {
-            isVisible = state.status != null
-            text = state.status.orEmpty()
+        if (!seek.isPressed) {
+            seek.progress = if (cast.durationMs > 0) (cast.positionMs * 1000 / cast.durationMs).toInt() else 0
+            time.text = if (cast.buffering) {
+                "${getString(R.string.buffering)} / ${cast.durationMs.toTimeString()}"
+            } else {
+                timeLine(cast.positionMs, cast.durationMs)
+            }
         }
+        if (!volumeBar.isPressed) volumeBar.progress = (cast.volume * 100).toInt()
+
+        renderStatus(state)
         syncSearchDialog(search)
     }
+
+    /** One message line, colored by severity; crash notices open the detail dialog. */
+    private fun renderStatus(state: UiState) {
+        val (text, isError) = when {
+            state.crash != null -> getString(R.string.crash_notice) to true
+            state.note != null -> state.note.text to state.note.error
+            state.loading -> getString(R.string.loading_on_tv) to false
+            state.cast.hasMedia -> null to false
+            !state.cast.connected -> getString(R.string.ready_connect) to false
+            state.video == null -> getString(R.string.ready_pick_video) to false
+            else -> getString(R.string.ready_to, state.cast.deviceName ?: "Chromecast") to false
+        }
+        statusView.isVisible = text != null
+        statusView.text = text.orEmpty()
+        if (isError) statusView.setTextColor(errorColor) else statusView.setTextColor(neutralStatusColors)
+    }
+
+    private fun showCrashDialog(stack: String) {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.crash_notice)
+            .setMessage(stack.take(4000))
+            .setPositiveButton(R.string.close, null)
+            .setOnDismissListener { vm.dismissCrash() }
+            .show()
+    }
+
+    private fun timeLine(positionMs: Long, durationMs: Long): String =
+        "${positionMs.toTimeString(durationMs)} / ${durationMs.toTimeString()}"
 
     private fun syncSearchDialog(search: SearchState?) {
         if (search == null) {
@@ -142,6 +223,7 @@ class MainActivity : AppCompatActivity() {
         (searchDialog ?: SearchDialog(
             activity = this,
             initial = search,
+            errorColor = errorColor,
             onSearch = vm::searchSubtitles,
             onPick = vm::downloadSubtitle,
             onDismiss = vm::closeSearch,
@@ -156,6 +238,7 @@ class MainActivity : AppCompatActivity() {
 private class SearchDialog(
     activity: AppCompatActivity,
     initial: SearchState,
+    private val errorColor: Int,
     onSearch: (query: String, languages: String) -> Unit,
     onPick: (OpenSubtitlesClient.Result) -> Unit,
     onDismiss: () -> Unit,
@@ -166,6 +249,7 @@ private class SearchDialog(
     private val searchButton = content.findViewById<Button>(R.id.search)
     private val progress = content.findViewById<ProgressBar>(R.id.progress)
     private val message = content.findViewById<TextView>(R.id.dialog_message)
+    private val messageDefaultColors = message.textColors
     private val adapter = ArrayAdapter<String>(activity, android.R.layout.simple_list_item_1)
 
     private var results: List<OpenSubtitlesClient.Result> = emptyList()
@@ -181,9 +265,18 @@ private class SearchDialog(
     init {
         query.setText(initial.query)
         languages.setText(initial.languages)
-        searchButton.setOnClickListener {
-            onSearch(query.text.toString(), languages.text.toString().ifBlank { "en" })
+        val submit = { onSearch(query.text.toString(), languages.text.toString().ifBlank { "en" }) }
+        searchButton.setOnClickListener { submit() }
+        val onIme = TextView.OnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+                submit()
+                true
+            } else {
+                false
+            }
         }
+        query.setOnEditorActionListener(onIme)
+        languages.setOnEditorActionListener(onIme)
         content.findViewById<ListView>(R.id.results).run {
             adapter = this@SearchDialog.adapter
             setOnItemClickListener { _, _, position, _ -> results.getOrNull(position)?.let(onPick) }
@@ -198,6 +291,7 @@ private class SearchDialog(
         searchButton.isEnabled = !search.searching
         message.isVisible = search.message != null
         message.text = search.message.orEmpty()
+        if (search.messageIsError) message.setTextColor(errorColor) else message.setTextColor(messageDefaultColors)
         adapter.run {
             clear()
             addAll(search.results.map { "[${it.language}] ⇩${it.downloads}  ${it.name}" })
@@ -210,13 +304,18 @@ private class SearchDialog(
     }
 }
 
-private fun SeekBar.onSeekReleased(action: (fraction: Float) -> Unit) =
+private fun SeekBar.onSeek(onPreview: (fraction: Float) -> Unit, onCommit: (fraction: Float) -> Unit) =
     setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-        override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {}
+        override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+            if (fromUser) onPreview(progress / seekBar.max.coerceAtLeast(1).toFloat())
+        }
+
         override fun onStartTrackingTouch(seekBar: SeekBar) {}
         override fun onStopTrackingTouch(seekBar: SeekBar) =
-            action(seekBar.progress / seekBar.max.coerceAtLeast(1).toFloat())
+            onCommit(seekBar.progress / seekBar.max.coerceAtLeast(1).toFloat())
     })
+
+private fun String.withCheck(done: Boolean): String = if (done) "✓ $this" else this
 
 /** [precisionRef] keeps "0:05:30 / 1:40:00" aligned instead of "5:30 / 1:40:00". */
 private fun Long.toTimeString(precisionRef: Long = this): String = (this / 1000).let { s ->
