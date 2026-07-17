@@ -173,7 +173,10 @@ class MainActivity : AppCompatActivity() {
         videoName.setTextColor(if (video == null) secondaryTextColors else primaryTextColors)
         stepSubtitles.text = getString(R.string.step_subtitles).withCheck(subtitle != null)
         subtitleName.text = when {
-            extracting != null -> getString(R.string.extracting_subtitles, extracting)
+            extracting != null -> getString(
+                R.string.extracting_subtitles,
+                extractingPercent?.let { "$extracting · $it%" } ?: extracting,
+            )
             else -> subtitle?.name ?: getString(R.string.no_subtitles)
         }
         subtitleName.setTextColor(

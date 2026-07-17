@@ -51,13 +51,28 @@ object EmbeddedSubtitles {
         }
     }
 
-    /** Extracts the track and renders it as WebVTT. */
-    fun extractVtt(context: Context, uri: Uri, track: Track): String {
+    /**
+     * Extracts the track and renders it as WebVTT. [onOpen] hands out the live
+     * stream so the caller can close it to abort a blocked read on cancel;
+     * [onProgress] reports the byte position while parsing (MKV only).
+     */
+    fun extractVtt(
+        context: Context,
+        uri: Uri,
+        track: Track,
+        onOpen: (AutoCloseable) -> Unit = {},
+        onProgress: (Long) -> Unit = {},
+    ): String {
         val cues = when (track.container) {
             // A real file descriptor unlocks the walker's Cues-index fast path
             // (both local SAF files and provider proxy descriptors are seekable).
             Container.MKV -> context.contentResolver.seekableOrStream(uri) { stream ->
-                MkvSubtitles.extract(stream, MkvSubtitles.Track(track.id, mkvCodecId(track.format), null, null))
+                onOpen(stream)
+                MkvSubtitles.extract(
+                    stream,
+                    MkvSubtitles.Track(track.id, mkvCodecId(track.format), null, null),
+                    onProgress,
+                )
             }
             Container.MP4 -> Mp4Subtitles.extract(context, uri, track.id.toInt())
         }

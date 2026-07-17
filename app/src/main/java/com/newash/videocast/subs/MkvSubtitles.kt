@@ -63,8 +63,12 @@ object MkvSubtitles {
     }
 
     /** All cues of [track], in play order: via the Cues index when usable, else a full scan. */
-    fun extract(input: InputStream, track: Track): List<SubtitleConverter.Cue> {
-        val source = Source(input)
+    fun extract(
+        input: InputStream,
+        track: Track,
+        onProgress: (bytePosition: Long) -> Unit = {},
+    ): List<SubtitleConverter.Cue> {
+        val source = Source(input, onProgress)
         source.enterSegment()
         val segStart = source.position
         val head = source.readHead(track.number)
@@ -438,7 +442,7 @@ object MkvSubtitles {
      * is recalibrated from the one mandatory seek (SeekHead → Cues) so local
      * files seek freely while network files stay near-sequential.
      */
-    private class Source(raw: InputStream) {
+    private class Source(raw: InputStream, private val onProgress: (Long) -> Unit = {}) {
         private val channel = (raw as? FileInputStream)?.channel
             ?.takeIf { ch -> runCatching { ch.position() }.isSuccess } // pipes throw ESPIPE
         private val rawInput = raw
@@ -447,7 +451,15 @@ object MkvSubtitles {
         val seekable get() = channel != null
 
         var position = channel?.position() ?: 0L
-            private set
+            private set(value) {
+                field = value
+                if (value - lastReported >= PROGRESS_STEP) {
+                    lastReported = value
+                    onProgress(value)
+                }
+            }
+
+        private var lastReported = 0L
 
         private var pushedBack: Header? = null
         private val scratch = ByteArray(SKIP_CHUNK)
@@ -558,6 +570,7 @@ object MkvSubtitles {
     private const val MAX_SEEK_THRESHOLD = 64L * 1024 * 1024
     private const val TIMING_MIN_BYTES = 4 * 1024
     private const val DEFAULT_BYTES_PER_NANO = 0.05 // ~50 MB/s when unmeasured
+    private const val PROGRESS_STEP = 512L * 1024
 
     const val CODEC_SRT = "S_TEXT/UTF8"
     const val CODEC_ASS = "S_TEXT/ASS"

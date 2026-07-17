@@ -36,6 +36,7 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicReference
 
 data class VideoFile(val uri: Uri, val name: String, val sizeBytes: Long, val mime: String)
 
@@ -72,6 +73,8 @@ data class UiState(
     val embeddedTracks: List<EmbeddedSubtitles.Track> = emptyList(),
     /** Label of the embedded track being extracted; null when idle. */
     val extracting: String? = null,
+    /** Extraction progress through the file, 0–100, when known. */
+    val extractingPercent: Int? = null,
     /** Set when sibling-subtitle auto-pick needs folder access; tapping the status line grants it. */
     val subtitleFolderHint: Uri? = null,
 ) {
@@ -99,6 +102,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var probeJob: Job? = null
     private var extractJob: Job? = null
     private var pickJob: Job? = null
+
+    /** The extraction's open stream — closed from outside to abort a blocked read. */
+    private val extractionStream = AtomicReference<AutoCloseable?>()
 
     private val prefs get() = app.getSharedPreferences("videocast", Context.MODE_PRIVATE)
 
@@ -148,7 +154,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
     fun onVideoPicked(uri: Uri) {
-        extractJob?.cancel() // a previous video's slow extraction must not land on this one
+        abortExtraction() // a previous video's slow extraction must not land on this one
         pickJob?.cancel()
         pickJob = viewModelScope.launch {
             // DocumentsProvider queries are cross-process IPC — keep them off Main.
@@ -251,30 +257,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun pickEmbeddedTrack(track: EmbeddedSubtitles.Track) {
         val video = _state.value.video ?: return
+        abortExtraction()
         val previous = extractJob
         extractJob = viewModelScope.launch {
-            previous?.cancelAndJoin() // serializes the extracting-flag hand-off
-            _state.update { it.copy(extracting = track.label) }
+            previous?.join() // serializes the extracting-state hand-off
+            _state.update { it.copy(extracting = track.label, extractingPercent = null) }
+            val total = video.sizeBytes.takeIf { it > 0 }
+            var lastPercent = -1
             try {
-                reporting({ e ->
-                    _state.update { it.copy(note = Note("Extraction failed (${track.label}): ${e.message}")) }
-                }) {
-                    val vtt = runInterruptible(Dispatchers.IO) { EmbeddedSubtitles.extractVtt(app, video.uri, track) }
-                    track.language?.let { rememberedLanguages = it }
-                    // Only apply to the still-current video (picks can race the extraction).
-                    if (_state.value.video?.uri == video.uri) {
-                        applySubtitle(SubtitleTrack(track.label, vtt, track.language?.take(2) ?: rememberedLanguageTag))
-                    }
+                val vtt = runInterruptible(Dispatchers.IO) {
+                    EmbeddedSubtitles.extractVtt(
+                        app, video.uri, track,
+                        onOpen = extractionStream::set,
+                        onProgress = { bytes ->
+                            val percent = total?.let { (bytes * 100 / it).toInt().coerceIn(0, 100) }
+                            if (percent != null && percent != lastPercent) {
+                                lastPercent = percent
+                                _state.update {
+                                    if (it.extracting == track.label) it.copy(extractingPercent = percent) else it
+                                }
+                            }
+                        },
+                    )
                 }
+                track.language?.let { rememberedLanguages = it }
+                // Only apply to the still-current video (picks can race the extraction).
+                if (_state.value.video?.uri == video.uri) {
+                    applySubtitle(SubtitleTrack(track.label, vtt, track.language?.take(2) ?: rememberedLanguageTag))
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // An aborted stream surfaces as IOException before the cancellation
+                // does — a user-initiated cancel must not read as a failure.
+                if (isActive) _state.update { it.copy(note = Note("Extraction failed (${track.label}): ${e.message}")) }
             } finally {
-                _state.update { it.copy(extracting = null) }
+                extractionStream.set(null)
+                _state.update { it.copy(extracting = null, extractingPercent = null) }
             }
         }
     }
 
-    fun cancelExtraction() {
-        extractJob?.cancel() // its finally block clears the extracting state
+    /** Cancels the running extraction and unblocks any stalled read by closing its stream. */
+    private fun abortExtraction() {
+        extractJob?.cancel()
+        extractionStream.getAndSet(null)?.let { stream -> runCatching { stream.close() } }
     }
+
+    fun cancelExtraction() = abortExtraction()
 
     fun onSubtitlePicked(uri: Uri) {
         viewModelScope.launch {
@@ -291,7 +321,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearSubtitle() {
-        extractJob?.cancel() // ✕ during extraction means "stop that"
+        abortExtraction() // ✕ during extraction means "stop that"
         applySubtitle(null)
     }
 
