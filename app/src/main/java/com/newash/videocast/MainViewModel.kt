@@ -54,16 +54,13 @@ data class SubtitleTrack(
 /** A running subtitle acquisition (extraction or slow read), shown on the subtitle line. */
 data class Extraction(val label: String, val auto: Boolean, val percent: Int? = null)
 
-/** A user-facing error message shown in the bottom status line (app-level errors). */
-data class Note(val text: String)
-
 data class SearchState(
     val results: List<OpenSubtitlesClient.Result> = emptyList(),
     val searching: Boolean = false,
     /** Error / progress / empty-result message shown inside the dialog. */
     val message: String? = null,
     val messageIsError: Boolean = false,
-    /** Last submitted (or prefilled) inputs — survive dialog recreation on rotation. */
+    /** Last submitted (or prefilled) inputs. */
     val query: String = "",
     val languages: String = "en",
 )
@@ -72,7 +69,8 @@ data class UiState(
     val video: VideoFile? = null,
     val subtitle: SubtitleTrack? = null,
     val cast: CastPlayer.Progress = CastPlayer.Progress(),
-    val note: Note? = null,
+    /** App-level error message shown in the bottom status line. */
+    val note: String? = null,
     /** Full stack of the previous run's crash; shown as a tappable one-liner. */
     val crash: String? = null,
     /** Cast pressed, receiver hasn't accepted the load yet. */
@@ -213,7 +211,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     subtitleError = null,
                     // Error prevention beats error reporting: warn at pick time.
                     note = if (video.sizeBytes <= 0) {
-                        Note("Video size unknown — casting will fail; pick it via a different provider")
+                        "Video size unknown — casting will fail; pick it via a different provider"
                     } else {
                         null
                     },
@@ -450,10 +448,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(search = null) }
     }
 
-    /** Keeps half-typed dialog inputs across rotation (state otherwise updates on submit). */
-    fun saveSearchInputs(query: String, languages: String) =
-        updateSearch { it.copy(query = query, languages = languages) }
-
     /** Updates search state only while the dialog is still open — a response must not resurrect it. */
     private fun updateSearch(transform: (SearchState) -> SearchState) =
         _state.update { it.copy(search = it.search?.let(transform)) }
@@ -498,7 +492,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val video = _state.value.video ?: return
         if (video.sizeBytes <= 0) return
         val player = castPlayer
-            ?: return _state.update { it.copy(note = Note("Google Cast is unavailable on this device")) }
+            ?: return _state.update { it.copy(note = "Google Cast is unavailable on this device") }
         viewModelScope.launch {
             _state.update { it.copy(loading = true, note = null) }
             reporting({ e -> onLoadResult(e.message ?: "unknown error") }) {
@@ -576,7 +570,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         // Clean up only when idle — a still-playing previous cast keeps its server.
         if (!_state.value.cast.hasMedia) stopStreaming()
-        _state.update { it.copy(loading = false, note = Note("Cast failed: $error")) }
+        _state.update { it.copy(loading = false, note = "Cast failed: $error") }
     }
 
     fun togglePlayPause() {

@@ -30,10 +30,6 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.mediarouter.app.MediaRouteButton
 import com.google.android.gms.cast.framework.CastButtonFactory
-import com.google.android.gms.cast.framework.CastContext
-import com.google.android.gms.cast.framework.CastState
-import com.google.android.gms.cast.framework.CastStateListener
-import com.google.android.gms.cast.framework.IntroductoryOverlay
 import com.newash.videocast.subs.OpenSubtitlesClient
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -82,31 +78,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private var searchDialog: SearchDialog? = null
-    /** The embedded-tracks or crash dialog — tracked so rotation doesn't leak its window. */
-    private var infoDialog: AlertDialog? = null
-    private var introOverlay: IntroductoryOverlay? = null
-    private var introShown = false
-    private val castStateListener = CastStateListener { state ->
-        if (state != CastState.NO_DEVICES_AVAILABLE && !introShown) {
-            introShown = true
-            introOverlay = IntroductoryOverlay.Builder(this, castIcon)
-                .setTitleText(getString(R.string.intro_overlay))
-                .setOverlayColor(R.color.cast_intro_scrim)
-                .setSingleTime()
-                .build()
-                .also(IntroductoryOverlay::show)
-        }
-    }
-
-    private val sharedCastContext
-        get() = runCatching { CastContext.getSharedInstance(this) }.getOrNull()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         applySystemBarInsets()
         CastButtonFactory.setUpMediaRouteButton(this, castIcon)
-        sharedCastContext?.addCastStateListener(castStateListener)
         if (savedInstanceState == null) requestNotificationPermissionOnce()
 
         findViewById<View>(R.id.pick_video).onClick { pickVideo.launch(arrayOf("video/*")) }
@@ -146,15 +123,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        sharedCastContext?.removeCastStateListener(castStateListener)
-        searchDialog?.let { vm.saveSearchInputs(it.queryText, it.languagesText) }
         searchDialog?.dismissSilently()
         searchDialog = null
-        infoDialog?.setOnDismissListener(null) // silent: rotation is not a dismissal
-        infoDialog?.dismiss()
-        infoDialog = null
-        introOverlay?.remove()
-        introOverlay = null
         super.onDestroy()
     }
 
@@ -245,7 +215,7 @@ class MainActivity : AppCompatActivity() {
     private fun renderStatus(state: UiState) {
         val (text, isError) = when {
             state.crash != null -> getString(R.string.crash_notice) to true
-            state.note != null -> state.note.text to true
+            state.note != null -> state.note to true
             state.subtitleFolderHint != null -> getString(R.string.subtitle_folder_hint) to false
             state.loading -> getString(R.string.loading_on_tv) to false
             state.cast.hasMedia -> null to false
@@ -260,7 +230,7 @@ class MainActivity : AppCompatActivity() {
         val tracks = vm.state.value.embeddedTracks.ifEmpty { return }
         // One obvious track shouldn't cost a dialog round-trip.
         tracks.singleOrNull()?.let { return vm.pickEmbeddedTrack(it) }
-        infoDialog = AlertDialog.Builder(this)
+        AlertDialog.Builder(this)
             .setTitle(R.string.embedded_dialog_title)
             .setItems(tracks.map { it.label }.toTypedArray()) { _, index ->
                 tracks.getOrNull(index)?.let(vm::pickEmbeddedTrack)
@@ -270,7 +240,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showCrashDialog(stack: String) {
-        infoDialog = AlertDialog.Builder(this)
+        AlertDialog.Builder(this)
             .setTitle(R.string.crash_notice)
             .setMessage(stack.take(4000))
             .setPositiveButton(R.string.close, null)
@@ -308,10 +278,6 @@ private class SearchDialog(
     private val content = activity.layoutInflater.inflate(R.layout.dialog_search, null)
     private val query = content.findViewById<EditText>(R.id.query)
     private val languages = content.findViewById<EditText>(R.id.languages)
-
-    /** Live input contents — saved across rotation, which recreates the dialog. */
-    val queryText: String get() = query.text.toString()
-    val languagesText: String get() = languages.text.toString()
     private val searchButton = content.findViewById<Button>(R.id.search)
     private val progress = content.findViewById<ProgressBar>(R.id.progress)
     private val message = content.findViewById<TextView>(R.id.dialog_message)

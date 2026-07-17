@@ -3,5 +3,4 @@
     <color name="ic_launcher_background">#1A237E</color>
     <!-- Dark scrim behind the cast intro overlay: its text is white, so the
          default (near-transparent on a light theme) makes it unreadable. -->
-    <color name="cast_intro_scrim">#E6263238</color>
 </resources>

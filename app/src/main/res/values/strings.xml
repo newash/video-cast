@@ -48,5 +48,4 @@
     <string name="no_results">No results — refine the title above</string>
     <string name="close">Close</string>
     <string name="leftover_media_hint">Controlling media from a previous cast — seeking unavailable, ■ stops it</string>
-    <string name="intro_overlay">Tap here to connect to your Chromecast</string>
 </resources>
