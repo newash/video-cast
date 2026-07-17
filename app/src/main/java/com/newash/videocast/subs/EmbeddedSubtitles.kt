@@ -7,6 +7,7 @@ import android.os.ParcelFileDescriptor
 import java.io.BufferedInputStream
 import java.io.IOException
 import java.io.InputStream
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Embedded text subtitle tracks of a picked video: MKV via [MkvSubtitles]
@@ -42,15 +43,15 @@ object EmbeddedSubtitles {
     enum class Container { MKV, MP4 }
 
     /**
-     * Early-VTT hook for [extractVtt], MKV only: [onVtt] fires (at most once, on
-     * the extraction thread) with a valid VTT of the cues collected so far, when
-     * the walk passes [untilMs] or [requestNow] is called. The final full VTT
-     * supersedes it. Inert for MP4 (its extraction has no incremental phase).
+     * Early-VTT hook for [extractVtt], MKV only: after [requestNow], [onVtt]
+     * fires (at most once, on the extraction thread, at the next block
+     * boundary) with a valid VTT of the cues collected so far. The final full
+     * VTT supersedes it. Inert for MP4 (its extraction has no incremental phase).
      */
-    class Snapshot(val untilMs: Long, val onVtt: (String) -> Unit) {
-        internal val now = java.util.concurrent.atomic.AtomicBoolean(false)
+    class Snapshot(val onVtt: (String) -> Unit) {
+        internal val now = AtomicBoolean(false)
 
-        /** Any thread: emit at the next block boundary instead of waiting for [untilMs]. */
+        /** Any thread: emit the cues collected so far. */
         fun requestNow() = now.set(true)
     }
 
@@ -106,9 +107,7 @@ object EmbeddedSubtitles {
                 MkvSubtitles.extract(
                     stream, track.id, track.codecId, onProgress,
                     snapshot?.let { s ->
-                        MkvSubtitles.SnapshotRequest(s.untilMs, s.now) { cues ->
-                            s.onVtt(SubtitleConverter.cuesToVtt(cues))
-                        }
+                        MkvSubtitles.SnapshotRequest(s.now) { cues -> s.onVtt(SubtitleConverter.cuesToVtt(cues)) }
                     },
                 )
             }

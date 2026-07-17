@@ -113,7 +113,7 @@ class MainActivity : AppCompatActivity() {
         embeddedSubtitles.onClick(::showEmbeddedTracksDialog)
         // ✕ doubles as cancel while extracting; clearing also dismisses a subtitle error.
         clearSubtitle.onClick {
-            if (vm.state.value.extraction != null) vm.cancelExtraction() else vm.clearSubtitle()
+            if (vm.state.value.extraction != null) vm.cancelAcquisition() else vm.clearSubtitle()
         }
         playOnTvButton.onClick(vm::startCasting)
         playPause.onClick(vm::togglePlayPause)
@@ -127,7 +127,6 @@ class MainActivity : AppCompatActivity() {
                 else -> {}
             }
         }
-
 
         seek.onSeek(
             onPreview = { fraction ->

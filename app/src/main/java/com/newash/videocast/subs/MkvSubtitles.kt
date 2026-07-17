@@ -64,15 +64,13 @@ object MkvSubtitles {
     }
 
     /**
-     * Early-result hook for [extract]: the one pass emits the cues collected so
-     * far, at most once — when the walk passes [untilMs] (every cue starting at
-     * or before it has been read) or when [now] is set from another thread (a
-     * wall-clock budget expiring). [onSnapshot] fires on the extraction thread
-     * with a prefix the final result supersedes; an empty list is possible
-     * (nudge before any cue). The callback must not throw.
+     * Early-result hook for [extract]: when [now] is set from any thread, the
+     * pass emits the cues collected so far (at most once, on the extraction
+     * thread, at the next block boundary). The final result supersedes the
+     * prefix; an empty list is possible (nudge before any cue). The callback
+     * must not throw.
      */
     class SnapshotRequest(
-        val untilMs: Long,
         val now: AtomicBoolean = AtomicBoolean(false),
         val onSnapshot: (List<SubtitleConverter.Cue>) -> Unit,
     )
@@ -90,35 +88,26 @@ object MkvSubtitles {
         val segStart = source.position
         val head = source.readHead(trackNumber)
         val emitter = snapshot?.let { request ->
-            // Saturating ms → ticks: a "never" threshold must not overflow into "now".
-            val untilTicks = request.untilMs.takeIf { it < Long.MAX_VALUE / 1_000_000 }
-                ?.let { it * 1_000_000 / head.scaleNs } ?: Long.MAX_VALUE
-            SnapshotEmitter(request, untilTicks) { blocks ->
-                request.onSnapshot(blocks.toCues(head.scaleNs, codecId))
-            }
+            SnapshotEmitter(request) { blocks -> request.onSnapshot(blocks.toCues(head.scaleNs, codecId)) }
         }
         val blocks = source.readIndexedBlocks(segStart, head, trackNumber, onProgress, emitter)
             ?: source.scanClusters(head, trackNumber, onProgress, emitter)
         return blocks.toCues(head.scaleNs, codecId)
     }
 
-    /** Once-only gate around a [SnapshotRequest], in segment ticks; one instance per pass. */
+    /** Once-only nudge latch around a [SnapshotRequest]; one instance per pass. */
     private class SnapshotEmitter(
         private val request: SnapshotRequest,
-        val untilTicks: Long,
         private val sink: (List<RawBlock>) -> Unit,
     ) {
         private var emitted = false
 
         /** Nudge poll — cheap enough for the per-block loops. */
         fun pollNow(blocks: List<RawBlock>) {
-            if (!emitted && request.now.get()) emit(blocks)
-        }
-
-        fun emit(blocks: List<RawBlock>) {
-            if (emitted) return
-            emitted = true
-            sink(blocks)
+            if (!emitted && request.now.get()) {
+                emitted = true
+                sink(blocks)
+            }
         }
     }
 
@@ -236,7 +225,7 @@ object MkvSubtitles {
         head: Head,
         trackNumber: Long,
         onProgress: (Int) -> Unit,
-        snapshot: SnapshotEmitter? = null,
+        snapshot: SnapshotEmitter?,
     ): List<RawBlock>? {
         if (!seekable) return null
         val entries = head.cues ?: head.cuesPosition?.let { pos ->
@@ -254,16 +243,12 @@ object MkvSubtitles {
         val sorted = entries
             .sortedWith(compareBy({ it.clusterPos }, { it.relPos ?: 0 }))
             .distinctBy { it.clusterPos to it.relPos }
-        // Correct even if cluster order and time order disagree: past this index,
-        // no remaining entry's CueTime is at or below the threshold.
-        val emitAt = snapshot?.let { s -> sorted.indexOfLast { it.timeTicks <= s.untilTicks } + 1 }
         val blocks = mutableListOf<RawBlock>()
         var clusterPos = -1L
         var clusterDataStart = -1L
         var clusterScanned = false
         try {
             for ((index, entry) in sorted.withIndex()) {
-                if (index == emitAt) snapshot?.emit(blocks) // every cue ≤ untilMs is collected
                 snapshot?.pollNow(blocks)
                 onProgress(index * 100 / sorted.size) // real work done: cues visited
                 if (entry.clusterPos != clusterPos) {
@@ -308,7 +293,7 @@ object MkvSubtitles {
         head: Head,
         trackNumber: Long,
         onProgress: (Int) -> Unit,
-        snapshot: SnapshotEmitter? = null,
+        snapshot: SnapshotEmitter?,
     ): List<RawBlock> {
         val blocks = mutableListOf<RawBlock>()
         if (head.firstClusterAt < 0) return blocks
@@ -319,14 +304,8 @@ object MkvSubtitles {
                 val header = nextHeader() ?: break
                 snapshot?.pollNow(blocks)
                 fileSize?.let { onProgress((position * 100 / it).toInt().coerceIn(0, 100)) }
-                if (header.id == ID_CLUSTER) {
-                    val clusterTs = readCluster(header.size, trackNumber, blocks, snapshot)
-                    // Clusters run in time order: one stamped past the threshold
-                    // means every cue at or below it has been collected.
-                    if (snapshot != null && clusterTs > snapshot.untilTicks) snapshot.emit(blocks)
-                } else {
-                    skipElement(header.id, header.size)
-                }
+                if (header.id == ID_CLUSTER) readCluster(header.size, trackNumber, blocks, snapshot)
+                else skipElement(header.id, header.size)
             }
         } catch (_: EOFException) {
             // Truncated file: return the cues collected so far.
@@ -385,13 +364,12 @@ object MkvSubtitles {
             .takeIf { type == TRACK_TYPE_SUBTITLE && number > 0 && codec.startsWith("S_TEXT/") }
     }
 
-    /** Reads one cluster's blocks into [out]; returns the cluster's timestamp. */
     private fun Source.readCluster(
         size: Long,
         trackNumber: Long,
         out: MutableList<RawBlock>,
         snapshot: SnapshotEmitter? = null,
-    ): Long {
+    ) {
         var clusterTs = 0L
         forEachChild(size, TOP_LEVEL_IDS + ID_CLUSTER) { id, childSize ->
             snapshot?.pollNow(out) // nudge lands at the next block boundary
@@ -406,7 +384,6 @@ object MkvSubtitles {
                 else -> skipElement(id, childSize)
             }
         }
-        return clusterTs
     }
 
     /** BlockGroup → (relative timestamp, text, BlockDuration or null) of [trackNumber]'s Block, else null. */

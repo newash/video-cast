@@ -17,17 +17,16 @@
     <string name="opensubtitles">OpenSubtitles</string>
     <string name="embedded_subtitles">In video</string>
     <string name="embedded_dialog_title">Subtitles in this video</string>
-    <string name="extracting_subtitles">🎞️ Extracting %1$s…</string>
-    <string name="extracting_subtitles_auto">🎞️ Auto · extracting %1$s…</string>
+    <string name="extracting_subtitles">Reading %1$s…</string>
+    <string name="extracting_subtitles_auto">Auto · reading %1$s…</string>
     <string name="cancel_extraction">Cancel extraction</string>
-    <string name="auto_suffix">· auto</string>
     <string name="clear_subtitle">Remove subtitle</string>
 
     <string name="not_connected">Not connected — tap the cast icon above</string>
     <string name="connecting">Connecting…</string>
 
     <string name="play_on_tv">▶ Play on TV</string>
-    <string name="recast_subtitles">↻ Re-cast with new subtitles</string>
+    <string name="recast_subtitles">↻ Re-cast with subtitle change</string>
     <string name="ready_pick_video">Pick a video first</string>
     <string name="ready_connect">Connect to a Chromecast (cast icon top right)</string>
     <string name="loading_on_tv">Loading on TV…</string>

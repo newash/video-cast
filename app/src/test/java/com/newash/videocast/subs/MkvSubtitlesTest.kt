@@ -305,24 +305,10 @@ class MkvSubtitlesTest {
 
     // ------------------------------------------------------------- snapshots
 
-    private class SnapProbe(untilMs: Long, now: Boolean = false) {
+    private class SnapProbe(now: Boolean = false) {
         val calls = mutableListOf<List<SubtitleConverter.Cue>>()
-        val request = MkvSubtitles.SnapshotRequest(untilMs, AtomicBoolean(now)) { calls += it }
-    }
-
-    @Test
-    fun `scan path snapshot fires once the walk passes untilMs`() {
-        val data = mkv(
-            header, tracks,
-            element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "one")),
-            element(0x1F43B675, uint(0xE7, 40_000), blockGroup(2, 0, 1000, "two")),
-            element(0x1F43B675, uint(0xE7, 80_000), blockGroup(2, 0, 1000, "three")),
-        )
-        val probe = SnapProbe(untilMs = 20_000)
-        val full = MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8", snapshot = probe.request)
-        // The crossing cluster's cues are included: prefix is a superset in time.
-        assertEquals(listOf(listOf("one", "two")), probe.calls.map { call -> call.map { it.text } })
-        assertEquals(listOf("one", "two", "three"), full.map { it.text })
+        val flag = AtomicBoolean(now)
+        val request = MkvSubtitles.SnapshotRequest(flag) { calls += it }
     }
 
     @Test
@@ -331,18 +317,40 @@ class MkvSubtitlesTest {
             header, tracks,
             element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "only")),
         )
-        val probe = SnapProbe(untilMs = Long.MAX_VALUE, now = true)
+        val probe = SnapProbe(now = true)
         val full = MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8", snapshot = probe.request)
         assertEquals(listOf(emptyList<SubtitleConverter.Cue>()), probe.calls)
         assertEquals(listOf("only"), full.map { it.text })
     }
 
     @Test
-    fun `indexed path snapshot at the entry threshold`() {
+    fun `nudge mid-scan emits the cues collected so far, once`() {
+        // Seekable file without a usable index: the indexed attempt bails and
+        // the scan runs with fileSize-driven progress we use as the trigger.
+        val data = mkv(
+            header, tracks,
+            element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "one")),
+            element(0x1F43B675, uint(0xE7, 40_000), blockGroup(2, 0, 1000, "two")),
+        )
+        val probe = SnapProbe()
+        var progressCalls = 0
+        val full = FileInputStream(tempMkv(data)).use {
+            MkvSubtitles.extract(
+                it, 2, "S_TEXT/UTF8",
+                onProgress = { if (++progressCalls == 2) probe.flag.set(true) },
+                snapshot = probe.request,
+            )
+        }
+        assertEquals(listOf(listOf("one")), probe.calls.map { call -> call.map { it.text } })
+        assertEquals(listOf("one", "two"), full.map { it.text })
+    }
+
+    @Test
+    fun `nudge mid-indexed-path emits the cues collected so far`() {
         val timestamp = uint(0xE7, 0)
-        val decoy = simpleBlock(1, 0, "video decoy")
-        val first = simpleBlock(2, 500, "early")
-        val second = simpleBlock(2, 5000, "late")
+        val decoy = simpleBlock(1, 0, "video decoy — absent proves the index route ran")
+        val first = blockGroup(2, 500, 1000, "early")
+        val second = blockGroup(2, 5000, 1000, "late")
         val cluster = element(0x1F43B675, timestamp, decoy, first, second)
         val shLen = seekHeadToCues(0).size.toLong()
         val clusterPos = shLen + header.size + tracks.size
@@ -354,39 +362,25 @@ class MkvSubtitlesTest {
             cuePoint(500, 2, clusterPos, relFirst, durationMs = null),
             cuePoint(5000, 2, clusterPos, relSecond, durationMs = null),
         )
-        val probe = SnapProbe(untilMs = 1000)
-        val file = tempMkv(mkv(seekHeadToCues(cuesPos), header, tracks, cluster, cues))
-        val full = FileInputStream(file).use {
-            MkvSubtitles.extract(it, 2, "S_TEXT/UTF8", snapshot = probe.request)
+        val probe = SnapProbe()
+        val full = FileInputStream(tempMkv(mkv(seekHeadToCues(cuesPos), header, tracks, cluster, cues))).use {
+            MkvSubtitles.extract(
+                it, 2, "S_TEXT/UTF8",
+                onProgress = { probe.flag.set(true) }, // set at the first entry: emit at the second
+                snapshot = probe.request,
+            )
         }
-        // Prefix's last cue carries the fallback cap; the full set corrects it.
-        assertEquals(listOf(SubtitleConverter.Cue(500, 8500, "early")), probe.calls.single())
-        assertEquals(5000L, full.first().endMs)
+        assertEquals(listOf(listOf("early")), probe.calls.map { call -> call.map { it.text } })
+        assertEquals(listOf("early", "late"), full.map { it.text })
     }
 
     @Test
-    fun `snapshot then truncation - full result is the same partial`() {
-        val data = mkv(
-            header, tracks,
-            element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "one")),
-            element(0x1F43B675, uint(0xE7, 40_000), blockGroup(2, 0, 1000, "two")),
-            element(0x1F43B675, uint(0xE7, 80_000), blockGroup(2, 0, 1000, "lost")),
-        )
-        val probe = SnapProbe(untilMs = 10_000)
-        val full = MkvSubtitles.extract(
-            ByteArrayInputStream(data.copyOf(data.size - 6)), 2, "S_TEXT/UTF8", snapshot = probe.request
-        )
-        assertEquals(listOf("one", "two"), probe.calls.single().map { it.text })
-        assertEquals(listOf("one", "two"), full.map { it.text })
-    }
-
-    @Test
-    fun `untilMs beyond the last cue never snapshots`() {
+    fun `no nudge means no snapshot`() {
         val data = mkv(
             header, tracks,
             element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "one")),
         )
-        val probe = SnapProbe(untilMs = Long.MAX_VALUE)
+        val probe = SnapProbe()
         MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8", snapshot = probe.request)
         assertTrue(probe.calls.isEmpty())
     }

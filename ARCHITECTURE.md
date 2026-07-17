@@ -194,9 +194,11 @@ Candidates considered:
   as the active track — subtitles from 0:00, near-instant start. When the
   extraction completes mid-playback, the app reloads at the current
   position with a bumped `?v=` track URL (`Cache-Control: no-store`) —
-  one short hiccup, then the complete cue set. Manually picked files and
-  OpenSubtitles downloads use the same late-attach reload when a cast is
-  running. The extraction's sequential read overlaps rclone's VFS cache
+  one short hiccup, then the complete cue set. All three sources —
+  embedded, file, OpenSubtitles — run through one acquisition pipeline in
+  the ViewModel (job supersession, auto-yields-to-explicit policy,
+  progress/error surfaces, stale-apply guard, language memory, apply +
+  re-cast); per-source code is just the fetch. The extraction's sequential read overlaps rclone's VFS cache
   of the cast stream, so network cost stays ~1× the file. Evaluated and
   rejected: a tee inside the server (cues trail the playhead; the cache
   already deduplicates bytes), growing/streamed sidecars (the receiver

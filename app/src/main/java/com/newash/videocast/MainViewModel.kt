@@ -51,7 +51,7 @@ data class SubtitleTrack(
     val auto: Boolean = false,
 )
 
-/** A running embedded-track extraction, as shown on the subtitle line. */
+/** A running subtitle acquisition (extraction or slow read), shown on the subtitle line. */
 data class Extraction(val label: String, val auto: Boolean, val percent: Int? = null)
 
 /** A user-facing error message shown in the bottom status line (app-level errors). */
@@ -77,13 +77,16 @@ data class UiState(
     val crash: String? = null,
     /** Cast pressed, receiver hasn't reported media yet. */
     val loading: Boolean = false,
-    /** Subtitle name active on the receiver — drives the re-cast affordance. */
+    /**
+     * Subtitle name active on the receiver. Arrivals auto-re-cast, so the manual
+     * re-cast affordance effectively surfaces only after clearing mid-cast.
+     */
     val castSubtitle: String? = null,
     /** null = search dialog closed. */
     val search: SearchState? = null,
     /** Text subtitle tracks found inside the picked video. */
     val embeddedTracks: List<EmbeddedSubtitles.Track> = emptyList(),
-    /** The embedded-track extraction in progress; null when idle. */
+    /** The subtitle acquisition in progress; null when idle. */
     val extraction: Extraction? = null,
     /** Subtitle-step error, shown red on the subtitle line (not the bottom status). */
     val subtitleError: String? = null,
@@ -114,18 +117,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var searchJob: Job? = null
     private var probeJob: Job? = null
-    private var extractJob: Job? = null
+    private var acquireJob: Job? = null
     private var pickJob: Job? = null
 
-    /** The extraction's open stream — closed from outside to abort a blocked read. */
-    private val extractionStream = AtomicReference<AutoCloseable?>()
+    /** The acquisition's open stream — closed from outside to abort a blocked read. */
+    private val acquisitionStream = AtomicReference<AutoCloseable?>()
 
     /** Bumped per subtitle change: a fresh ?v= makes the receiver re-fetch on reload. */
     private var vttVersion = 0
 
-    /** Early-snapshot hook of the running extraction, nudged by [startCasting]'s gate. */
-    private var extractionSnapshot: EmbeddedSubtitles.Snapshot? = null
-    private var earlyVtt: CompletableDeferred<String>? = null
+    /** Early-snapshot hook of a running extraction, nudged by [awaitPrefixVtt]. */
+    private class SnapshotHook {
+        val vtt = CompletableDeferred<String>()
+        val snapshot = EmbeddedSubtitles.Snapshot { vtt.complete(it) }
+    }
+
+    private var snapshotHook: SnapshotHook? = null
 
     private val prefs get() = app.getSharedPreferences("videocast", Context.MODE_PRIVATE)
 
@@ -183,7 +190,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------ video pick
 
     fun onVideoPicked(uri: Uri) {
-        cancelExtraction() // a previous video's slow extraction must not land on this one
+        cancelAcquisition() // a previous video's slow acquisition must not land on this one
         pickJob?.cancel()
         pickJob = viewModelScope.launch {
             // DocumentsProvider queries are cross-process IPC — keep them off Main.
@@ -262,7 +269,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The one-time folder grant from the status-line hint; then auto-pick reruns. */
     fun onSubtitleFolderPicked(treeUri: Uri) {
-        cancelExtraction() // the re-probe supersedes any auto-started extraction
+        cancelAcquisition() // the re-probe supersedes any auto-started extraction
         runCatching {
             app.contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
@@ -270,121 +277,146 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.value.video?.uri?.let(::probeEmbeddedTracks)
     }
 
-    // ------------------------------------------------------------ extraction
+    // -------------------------------------------------- subtitle acquisition
 
-    fun pickEmbeddedTrack(track: EmbeddedSubtitles.Track, auto: Boolean = false) {
-        val video = _state.value.video ?: return
-        cancelExtraction()
-        val previous = extractJob
-        // The gate in startCasting nudges this for whatever cues exist at Play time.
-        val early = CompletableDeferred<String>()
-        val snapshot = EmbeddedSubtitles.Snapshot(untilMs = Long.MAX_VALUE) { vtt -> early.complete(vtt) }
-        extractionSnapshot = snapshot
-        earlyVtt = early
-        extractJob = viewModelScope.launch {
-            previous?.join() // serializes the extraction-state hand-off
-            _state.update { it.copy(extraction = Extraction(track.label, auto), subtitleError = null) }
+    /**
+     * Shared tail of every subtitle source — embedded, file, online. Owns job
+     * bookkeeping, the subtitle-line progress/error surfaces, language memory,
+     * the stale-apply guard, and the final applySubtitle + re-cast. [fetch]
+     * runs on IO and returns the ready track; per-source code reduces to that
+     * fetch plus its surface deltas.
+     *
+     * An explicit pick supersedes whatever acquisition is running; an [auto]
+     * pick yields to it instead — the app's guess must never kill the user's
+     * choice. [progress] labels the subtitle line while fetching; null leaves
+     * the line alone (the search dialog paints its own progress). [onApplied]
+     * runs between apply and the cast re-cast.
+     */
+    private fun acquireSubtitle(
+        auto: Boolean = false,
+        progress: String? = null,
+        hook: SnapshotHook? = null,
+        onError: (Exception) -> Unit = { e ->
+            _state.update { it.copy(subtitleError = "Subtitle error: ${e.message}") }
+        },
+        onApplied: () -> Unit = {},
+        fetch: suspend () -> SubtitleTrack,
+    ): Job? {
+        if (auto && acquireJob?.isActive == true) return null
+        if (!auto) cancelAcquisition()
+        snapshotHook = hook
+        val videoUri = _state.value.video?.uri
+        val previous = acquireJob
+        return viewModelScope.launch {
+            previous?.join() // serializes the progress-state hand-off
+            _state.update { it.copy(extraction = progress?.let { p -> Extraction(p, auto) }, subtitleError = null) }
             try {
-                reporting({ e ->
-                    // An aborted stream surfaces as IOException before the cancellation
-                    // does — a user-initiated cancel must not read as a failure.
-                    if (isActive) {
-                        val partial = if (early.isCompleted) " — the TV keeps the partial subtitles" else ""
-                        _state.update {
-                            it.copy(subtitleError = "Extraction failed (${track.label}): ${e.message}$partial")
-                        }
-                    }
-                }) {
-                    val vtt = runInterruptible(Dispatchers.IO) {
-                        EmbeddedSubtitles.extractVtt(
-                            app, video.uri, track,
-                            onOpen = extractionStream::set,
-                            onProgress = { percent ->
-                                _state.update { state ->
-                                    state.extraction?.takeIf { it.label == track.label }
-                                        ?.let { state.copy(extraction = it.copy(percent = percent)) }
-                                        ?: state
-                                }
-                            },
-                            snapshot = snapshot,
-                        )
-                    }
-                    track.language?.let { rememberedLanguages = it }
-                    // Only apply to the still-current video (picks can race the extraction).
-                    if (_state.value.video?.uri == video.uri) {
-                        applySubtitle(
-                            SubtitleTrack(track.plainLabel, vtt, track.language, SubtitleSource.EMBEDDED, auto)
-                        )
-                        // Late finish during playback: put the complete cues on the TV.
-                        attachSubtitleToCast()
+                // A stream closed by cancelAcquisition surfaces as IOException before
+                // the cancellation does — that must not read as a failure.
+                reporting({ e -> if (isActive) onError(e) }) {
+                    val track = withContext(Dispatchers.IO) { fetch() }
+                    // An explicit pick in a known language becomes the preference.
+                    if (!auto) track.language?.let { rememberedLanguages = it }
+                    // Only apply to the still-current video (picks race async work).
+                    if (_state.value.video?.uri == videoUri) {
+                        applySubtitle(track)
+                        onApplied()
+                        // Late finish during playback: put the new cues on the TV.
+                        recastWithSubtitle()
                     }
                 }
             } finally {
-                extractionStream.set(null)
-                if (extractionSnapshot === snapshot) {
-                    extractionSnapshot = null
-                    earlyVtt = null
-                }
+                acquisitionStream.set(null)
+                if (snapshotHook === hook) snapshotHook = null
+                hook?.vtt?.complete("") // release any gate still waiting on this run
                 _state.update { it.copy(extraction = null) }
             }
+        }.also { acquireJob = it }
+    }
+
+    /** Cancels the running acquisition and unblocks any stalled read by closing its stream. */
+    fun cancelAcquisition() {
+        acquireJob?.cancel()
+        acquisitionStream.getAndSet(null)?.let { stream -> runCatching { stream.close() } }
+        // Release anything gating on the dead run's snapshot; its finally may lag.
+        snapshotHook?.vtt?.complete("")
+        snapshotHook = null
+    }
+
+    fun pickEmbeddedTrack(track: EmbeddedSubtitles.Track, auto: Boolean = false) {
+        val video = _state.value.video ?: return
+        val hook = SnapshotHook()
+        acquireSubtitle(
+            auto = auto,
+            progress = track.label,
+            hook = hook,
+            onError = { e ->
+                val partial = if (hook.vtt.isCompleted) " — the TV keeps the partial subtitles" else ""
+                _state.update {
+                    it.copy(subtitleError = "Extraction failed (${track.label}): ${e.message}$partial")
+                }
+            },
+        ) {
+            val vtt = runInterruptible {
+                EmbeddedSubtitles.extractVtt(
+                    app, video.uri, track,
+                    onOpen = acquisitionStream::set,
+                    onProgress = { percent ->
+                        _state.update { state ->
+                            state.extraction?.takeIf { it.label == track.label }
+                                ?.let { state.copy(extraction = it.copy(percent = percent)) }
+                                ?: state
+                        }
+                    },
+                    snapshot = hook.snapshot,
+                )
+            }
+            SubtitleTrack(track.plainLabel, vtt, track.language, SubtitleSource.EMBEDDED, auto)
         }
     }
 
-    /** Cancels the running extraction and unblocks any stalled read by closing its stream. */
-    fun cancelExtraction() {
-        extractJob?.cancel()
-        extractionStream.getAndSet(null)?.let { stream -> runCatching { stream.close() } }
-    }
-
-    // -------------------------------------------------------- other sources
-
     fun onSubtitlePicked(uri: Uri, auto: Boolean = false) {
-        if (!auto) cancelExtraction() // an explicit pick supersedes a running extraction
-        viewModelScope.launch {
-            reporting({ e -> _state.update { it.copy(subtitleError = "Subtitle error: ${e.message}") } }) {
-                val track = withContext(Dispatchers.IO) {
-                    val name = app.contentResolver.displayName(uri) ?: "subtitle file"
-                    val bytes = app.contentResolver.openInputStream(uri)?.use { it.readAtMost(MAX_SUBTITLE_BYTES) }
-                        ?: error("cannot read subtitle file")
-                    // The filename's own language token beats assuming the preference.
-                    val language = name.languageFromFileName() ?: rememberedLanguageTag
-                    SubtitleTrack(name, SubtitleConverter.toVtt(bytes, name), language, SubtitleSource.FILE, auto)
-                }
-                applySubtitle(track)
-                attachSubtitleToCast() // same late-attach behavior as embedded extraction
+        acquireSubtitle(auto = auto, progress = "subtitle file") {
+            runInterruptible {
+                val name = app.contentResolver.displayName(uri) ?: "subtitle file"
+                // Registered so ✕ or a superseding pick can abort a stalled network read.
+                val bytes = app.contentResolver.openInputStream(uri)?.also(acquisitionStream::set)
+                    ?.use { it.readAtMost(MAX_SUBTITLE_BYTES) }
+                    ?: error("cannot read subtitle file")
+                // The filename's own language token; untagged files stay honestly unknown.
+                val language = name.languageFromFileName()
+                SubtitleTrack(name, SubtitleConverter.toVtt(bytes, name), language, SubtitleSource.FILE, auto)
             }
         }
     }
 
     fun clearSubtitle() {
-        cancelExtraction() // ✕ during extraction means "stop that"
+        cancelAcquisition() // ✕ during an acquisition means "stop that"
         applySubtitle(null)
     }
 
     fun downloadSubtitle(result: OpenSubtitlesClient.Result) {
         if (_state.value.search?.searching == true) return // list stays clickable during a download
-        cancelExtraction() // an explicit pick supersedes a running extraction
-        searchJob?.cancel()
-        searchJob = viewModelScope.launch {
-            updateSearch { it.copy(searching = true, message = app.getString(R.string.downloading, result.name), messageIsError = false) }
-            reporting({ e ->
+        searchJob?.cancel() // a late search response must not paint over the download state
+        updateSearch { it.copy(searching = true, message = app.getString(R.string.downloading, result.name), messageIsError = false) }
+        // Registered in both slots: closeSearch or a new search still cancels the
+        // download; any other pick supersedes it through the pipeline.
+        searchJob = acquireSubtitle(
+            onError = { e ->
                 updateSearch { it.copy(searching = false, message = app.getString(R.string.download_failed, e.message), messageIsError = true) }
-            }) {
-                val track = withContext(Dispatchers.IO) {
-                    val vtt = SubtitleConverter.toVtt(openSubtitles.download(result.fileId), result.name)
-                    SubtitleTrack(result.name, vtt, LanguageTag.normalize(result.language), SubtitleSource.ONLINE)
-                }
-                applySubtitle(track)
-                closeSearch()
-                attachSubtitleToCast() // same late-attach behavior as embedded extraction
-            }
+            },
+            // Close without cancelling: closeSearch() would cancel this very job.
+            onApplied = { _state.update { it.copy(search = null) } },
+        ) {
+            val vtt = SubtitleConverter.toVtt(openSubtitles.download(result.fileId), result.name)
+            SubtitleTrack(result.name, vtt, LanguageTag.normalize(result.language), SubtitleSource.ONLINE)
         }
     }
 
     private fun applySubtitle(track: SubtitleTrack?) {
         ServerHolder.server?.subtitleVtt = track?.vtt
-        // No status message: the Cast button itself turns into the re-cast
-        // affordance when the loaded subtitle differs from the cast one.
+        // No status message: arrivals re-cast automatically; only clearing
+        // mid-cast leaves the button as the manual re-cast affordance.
         // The folder hint survives on purpose: a grant upgrades future auto-picks.
         _state.update { it.copy(subtitle = track, note = null, subtitleError = null) }
     }
@@ -441,7 +473,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * subtitle track carries a snapshot of the cues collected so far — the
      * extraction has been running since pick time, so by Play it has usually
      * covered the first many minutes; a short gate handles a lightning-fast
-     * tap. The full VTT later swaps in via [attachSubtitleToCast].
+     * tap. The full VTT later swaps in via [recastWithSubtitle].
      */
     private fun startCasting(resumeAtMs: Long) {
         val video = _state.value.video ?: return
@@ -454,20 +486,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val (ip, server) = withContext(Dispatchers.IO) {
                     (localIpv4() ?: error("No Wi-Fi/LAN address found")) to ServerHolder.ensureStarted(app)
                 }
-                // Re-read after the server start: the extraction may just have finished.
+                val prefixVtt = _state.value
+                    .takeIf { it.video?.uri == video.uri && it.subtitle == null && it.extraction != null }
+                    ?.let { awaitPrefixVtt() }
+                // Re-read after the gate: the acquisition may just have finished,
+                // or a new pick may have replaced the video.
                 val current = _state.value
-                if (current.video?.uri != video.uri) return@reporting
-                val prefixVtt = if (current.subtitle == null && current.extraction != null) {
-                    extractionSnapshot?.requestNow()
-                    earlyVtt?.let { withTimeoutOrNull(PREFIX_GATE_MS) { it.await() } }
-                } else {
-                    null
+                if (current.video?.uri != video.uri) {
+                    _state.update { it.copy(loading = false) }
+                    return@reporting
                 }
                 val subtitlePending = current.subtitle == null && current.extraction != null
                 StreamingService.start(app)
                 server.video = MediaServer.Video(video.uri, video.mime, video.sizeBytes)
+                // null → the subtitle route serves a valid empty VTT by itself.
                 server.subtitleVtt = current.subtitle?.vtt ?: prefixVtt
-                    ?: MediaServer.EMPTY_VTT.takeIf { subtitlePending }
                 val base = "http://$ip:${server.port}"
                 vttVersion++
                 player.load(
@@ -475,7 +508,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     mime = video.mime,
                     title = video.name,
                     subtitleUrl = (base + MediaServer.SUBTITLE_PATH + "?v=$vttVersion")
-                        .takeIf { current.subtitle != null || subtitlePending },
+                        .takeIf { current.subtitle != null || subtitlePending || prefixVtt != null },
                     subtitleLanguage = current.subtitle?.language ?: rememberedLanguageTag,
                     startPositionMs = resumeAtMs,
                     onResult = ::onLoadResult,
@@ -486,12 +519,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * A subtitle arrived while the cast is running: reload at the current
-     * position with a fresh track URL — one short hiccup, then complete cues.
+     * A subtitle arrived while the cast is running: reload at the live position
+     * with a fresh track URL — one short hiccup, then complete cues.
      */
-    private fun attachSubtitleToCast() {
-        val cast = _state.value.cast
-        if (cast.hasMedia) startCasting(resumeAtMs = cast.positionMs)
+    private fun recastWithSubtitle() {
+        // Query the SDK directly: the polled state freezes while backgrounded.
+        val progress = runCatching { castPlayer?.progress() }.getOrNull() ?: return
+        if (progress.hasMedia) startCasting(resumeAtMs = progress.positionMs)
+    }
+
+    /** Nudges the running acquisition and briefly awaits its cues-so-far VTT. */
+    private suspend fun awaitPrefixVtt(): String? {
+        val hook = snapshotHook ?: return null
+        hook.snapshot.requestNow()
+        return withTimeoutOrNull(PREFIX_VTT_TIMEOUT_MS) { hook.vtt.await() }?.takeIf { it.isNotEmpty() }
     }
 
     private fun onLoadResult(error: String?) {
@@ -532,7 +573,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         const val MAX_SUBTITLE_BYTES = 10 * 1024 * 1024
 
         /** Longest wait for the Play-time cue snapshot — usually resolves in milliseconds. */
-        const val PREFIX_GATE_MS = 4_000L
+        const val PREFIX_VTT_TIMEOUT_MS = 4_000L
     }
 }
 

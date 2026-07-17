@@ -133,8 +133,8 @@ class MediaServer(private val context: Context, val port: Int) {
         const val SUBTITLE_PATH = "/subs.vtt"
         const val DEFAULT_PORT = 8394
 
-        /** Valid-but-empty sidecar: served while an extraction is still producing the real one. */
-        const val EMPTY_VTT = "WEBVTT\n\n"
+        /** Valid-but-empty sidecar: served while an acquisition is still producing the real one. */
+        private const val EMPTY_VTT = "WEBVTT\n\n"
 
         // Generous: the Chromecast holds connections open while buffering.
         private const val SOCKET_TIMEOUT_MS = 30_000
