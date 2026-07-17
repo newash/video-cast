@@ -66,14 +66,14 @@ object MkvSubtitles {
     fun extract(
         input: InputStream,
         track: Track,
-        onProgress: (bytePosition: Long) -> Unit = {},
+        onProgress: (percent: Int) -> Unit = {},
     ): List<SubtitleConverter.Cue> {
-        val source = Source(input, onProgress)
+        val source = Source(input)
         source.enterSegment()
         val segStart = source.position
         val head = source.readHead(track.number)
-        val blocks = source.readIndexedBlocks(segStart, head, track.number)
-            ?: source.scanClusters(head, track.number)
+        val blocks = source.readIndexedBlocks(segStart, head, track.number, onProgress)
+            ?: source.scanClusters(head, track.number, onProgress)
         return blocks.toCues(head.scaleNs, track.codecId)
     }
 
@@ -186,7 +186,12 @@ object MkvSubtitles {
      * the index is absent, empty for this track, or untrustworthy — the caller
      * then falls back to the full scan.
      */
-    private fun Source.readIndexedBlocks(segStart: Long, head: Head, trackNumber: Long): List<RawBlock>? {
+    private fun Source.readIndexedBlocks(
+        segStart: Long,
+        head: Head,
+        trackNumber: Long,
+        onProgress: (Int) -> Unit = {},
+    ): List<RawBlock>? {
         if (!seekable) return null
         val entries = head.cues ?: head.cuesPosition?.let { pos ->
             runCatching {
@@ -208,7 +213,8 @@ object MkvSubtitles {
         var clusterDataStart = -1L
         var clusterScanned = false
         try {
-            for (entry in sorted) {
+            for ((index, entry) in sorted.withIndex()) {
+                onProgress(index * 100 / sorted.size) // real work done: cues visited
                 if (entry.clusterPos != clusterPos) {
                     clusterPos = entry.clusterPos
                     advanceTo(segStart + entry.clusterPos)
@@ -244,7 +250,11 @@ object MkvSubtitles {
     private class RawBlock(val timestamp: Long, val duration: Long?, val payload: String)
 
     /** The fallback: walk every cluster, skipping other tracks' payloads. */
-    private fun Source.scanClusters(head: Head, trackNumber: Long): List<RawBlock> {
+    private fun Source.scanClusters(
+        head: Head,
+        trackNumber: Long,
+        onProgress: (Int) -> Unit = {},
+    ): List<RawBlock> {
         val blocks = mutableListOf<RawBlock>()
         if (head.firstClusterAt < 0) return blocks
         // The cues attempt may have moved us; a pushed-back header means we never left.
@@ -252,6 +262,7 @@ object MkvSubtitles {
         try {
             while (true) {
                 val header = nextHeader() ?: break
+                fileSize?.let { onProgress((position * 100 / it).toInt().coerceIn(0, 100)) }
                 if (header.id == ID_CLUSTER) readCluster(header.size, trackNumber, blocks)
                 else skipElement(header.id, header.size)
             }
@@ -442,24 +453,17 @@ object MkvSubtitles {
      * is recalibrated from the one mandatory seek (SeekHead → Cues) so local
      * files seek freely while network files stay near-sequential.
      */
-    private class Source(raw: InputStream, private val onProgress: (Long) -> Unit = {}) {
+    private class Source(raw: InputStream) {
         private val channel = (raw as? FileInputStream)?.channel
             ?.takeIf { ch -> runCatching { ch.position() }.isSuccess } // pipes throw ESPIPE
         private val rawInput = raw
         private var input: InputStream = BufferedInputStream(raw, BUFFER_SIZE)
 
         val seekable get() = channel != null
+        val fileSize: Long? = channel?.let { ch -> runCatching { ch.size() }.getOrNull()?.takeIf { it > 0 } }
 
         var position = channel?.position() ?: 0L
-            private set(value) {
-                field = value
-                if (value - lastReported >= PROGRESS_STEP) {
-                    lastReported = value
-                    onProgress(value)
-                }
-            }
-
-        private var lastReported = 0L
+            private set
 
         private var pushedBack: Header? = null
         private val scratch = ByteArray(SKIP_CHUNK)
@@ -570,7 +574,6 @@ object MkvSubtitles {
     private const val MAX_SEEK_THRESHOLD = 64L * 1024 * 1024
     private const val TIMING_MIN_BYTES = 4 * 1024
     private const val DEFAULT_BYTES_PER_NANO = 0.05 // ~50 MB/s when unmeasured
-    private const val PROGRESS_STEP = 512L * 1024
 
     const val CODEC_SRT = "S_TEXT/UTF8"
     const val CODEC_ASS = "S_TEXT/ASS"

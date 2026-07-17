@@ -54,14 +54,14 @@ object EmbeddedSubtitles {
     /**
      * Extracts the track and renders it as WebVTT. [onOpen] hands out the live
      * stream so the caller can close it to abort a blocked read on cancel;
-     * [onProgress] reports the byte position while parsing (MKV only).
+     * [onProgress] reports work done in percent (MKV only).
      */
     fun extractVtt(
         context: Context,
         uri: Uri,
         track: Track,
         onOpen: (AutoCloseable) -> Unit = {},
-        onProgress: (Long) -> Unit = {},
+        onProgress: (Int) -> Unit = {},
     ): String {
         val cues = when (track.container) {
             // A real file descriptor unlocks the walker's Cues-index fast path

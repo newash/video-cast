@@ -262,16 +262,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         extractJob = viewModelScope.launch {
             previous?.join() // serializes the extracting-state hand-off
             _state.update { it.copy(extracting = track.label, extractingPercent = null) }
-            val total = video.sizeBytes.takeIf { it > 0 }
             var lastPercent = -1
             try {
                 val vtt = runInterruptible(Dispatchers.IO) {
                     EmbeddedSubtitles.extractVtt(
                         app, video.uri, track,
                         onOpen = extractionStream::set,
-                        onProgress = { bytes ->
-                            val percent = total?.let { (bytes * 100 / it).toInt().coerceIn(0, 100) }
-                            if (percent != null && percent != lastPercent) {
+                        onProgress = { percent ->
+                            if (percent != lastPercent) {
                                 lastPercent = percent
                                 _state.update {
                                     if (it.extracting == track.label) it.copy(extractingPercent = percent) else it
