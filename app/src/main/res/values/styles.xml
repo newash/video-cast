@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <style name="AppButton" parent="Widget.AppCompat.Button">
+        <item name="android:textAllCaps">false</item>
+    </style>
+
 
     <!-- 16sp + weight (not size) marks section labels, per M3 type roles. -->
     <style name="SectionHeader">

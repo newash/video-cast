@@ -20,13 +20,18 @@ import com.newash.videocast.util.localIpv4
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.InputStream
 
 data class VideoFile(val uri: Uri, val name: String, val sizeBytes: Long, val mime: String)
 
@@ -61,8 +66,8 @@ data class UiState(
     val search: SearchState? = null,
     /** Text subtitle tracks found inside the picked video. */
     val embeddedTracks: List<EmbeddedSubtitles.Track> = emptyList(),
-    /** An embedded track is being extracted from the container. */
-    val extracting: Boolean = false,
+    /** Label of the embedded track being extracted; null when idle. */
+    val extracting: String? = null,
 ) {
     val defaultQuery: String get() = video?.name?.toSearchQuery().orEmpty()
     val subtitleDirty: Boolean get() = cast.hasMedia && subtitle?.name != castSubtitle
@@ -86,6 +91,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var searchJob: Job? = null
     private var probeJob: Job? = null
+    private var extractJob: Job? = null
+    private var pickJob: Job? = null
 
     private val prefs get() = app.getSharedPreferences("videocast", Context.MODE_PRIVATE)
 
@@ -135,7 +142,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
     fun onVideoPicked(uri: Uri) {
-        viewModelScope.launch {
+        extractJob?.cancel() // a previous video's slow extraction must not land on this one
+        pickJob?.cancel()
+        pickJob = viewModelScope.launch {
             // DocumentsProvider queries are cross-process IPC — keep them off Main.
             val video = withContext(Dispatchers.IO) { app.contentResolver.describeVideo(uri) }
             _state.update {
@@ -159,9 +168,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         probeJob?.cancel()
         probeJob = viewModelScope.launch {
             val preferred = rememberedLanguageTag
-            val tracks = withContext(Dispatchers.IO) {
-                runCatching { EmbeddedSubtitles.listTracks(app, uri) }.getOrDefault(emptyList())
-            }.sortedByDescending { it.language?.startsWith(preferred) == true }
+            val tracks = runCatching {
+                // runInterruptible: cancellation must actually stop the blocking reads.
+                runInterruptible(Dispatchers.IO) { EmbeddedSubtitles.listTracks(app, uri) }
+            }.getOrDefault(emptyList())
+                .sortedByDescending { it.language?.startsWith(preferred) == true }
             // Only annotate the still-current video (picks can race the probe).
             _state.update { if (it.video?.uri == uri) it.copy(embeddedTracks = tracks) else it }
         }
@@ -169,17 +180,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun pickEmbeddedTrack(track: EmbeddedSubtitles.Track) {
         val video = _state.value.video ?: return
-        viewModelScope.launch {
-            _state.update { it.copy(extracting = true) }
-            reporting({ e ->
-                _state.update { it.copy(extracting = false, note = Note("Extraction failed: ${e.message}")) }
-            }) {
-                val vtt = withContext(Dispatchers.IO) { EmbeddedSubtitles.extractVtt(app, video.uri, track) }
-                track.language?.let { rememberedLanguages = it }
-                _state.update { it.copy(extracting = false) }
-                applySubtitle(SubtitleTrack(track.label, vtt, track.language?.take(2) ?: rememberedLanguageTag))
+        val previous = extractJob
+        extractJob = viewModelScope.launch {
+            previous?.cancelAndJoin() // serializes the extracting-flag hand-off
+            _state.update { it.copy(extracting = track.label) }
+            try {
+                reporting({ e ->
+                    _state.update { it.copy(note = Note("Extraction failed (${track.label}): ${e.message}")) }
+                }) {
+                    val vtt = runInterruptible(Dispatchers.IO) { EmbeddedSubtitles.extractVtt(app, video.uri, track) }
+                    track.language?.let { rememberedLanguages = it }
+                    // Only apply to the still-current video (picks can race the extraction).
+                    if (_state.value.video?.uri == video.uri) {
+                        applySubtitle(SubtitleTrack(track.label, vtt, track.language?.take(2) ?: rememberedLanguageTag))
+                    }
+                }
+            } finally {
+                _state.update { it.copy(extracting = null) }
             }
         }
+    }
+
+    fun cancelExtraction() {
+        extractJob?.cancel() // its finally block clears the extracting state
     }
 
     fun onSubtitlePicked(uri: Uri) {
@@ -187,7 +210,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             reporting({ e -> _state.update { it.copy(note = Note("Subtitle error: ${e.message}")) } }) {
                 val track = withContext(Dispatchers.IO) {
                     val name = app.contentResolver.displayName(uri) ?: "subtitle"
-                    val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    val bytes = app.contentResolver.openInputStream(uri)?.use { it.readAtMost(MAX_SUBTITLE_BYTES) }
                         ?: error("cannot read subtitle file")
                     SubtitleTrack(name, SubtitleConverter.toVtt(bytes, name), rememberedLanguageTag)
                 }
@@ -196,7 +219,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun clearSubtitle() = applySubtitle(null)
+    fun clearSubtitle() {
+        extractJob?.cancel() // ✕ during extraction means "stop that"
+        applySubtitle(null)
+    }
 
     fun openSearch() {
         val query = _state.value.defaultQuery
@@ -328,6 +354,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val PREF_SUBTITLE_LANGUAGES = "subtitle_languages"
+        const val MAX_SUBTITLE_BYTES = 10 * 1024 * 1024
+    }
+}
+
+/** Bounded read: a mispicked video must not be pulled whole into memory. */
+private fun InputStream.readAtMost(limit: Int): ByteArray {
+    val out = ByteArrayOutputStream()
+    val buffer = ByteArray(64 * 1024)
+    while (true) {
+        val read = read(buffer)
+        if (read < 0) return out.toByteArray()
+        out.write(buffer, 0, read)
+        if (out.size() > limit) throw IOException("not a subtitle file (bigger than ${limit / (1 shl 20)} MB)")
     }
 }
 

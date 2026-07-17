@@ -5,6 +5,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
+import java.io.File
+import java.io.FileInputStream
 
 /** Exercises the EBML walker against synthetic MKV files built byte by byte. */
 class MkvSubtitlesTest {
@@ -173,5 +175,131 @@ class MkvSubtitlesTest {
     fun `sniffs mkv magic`() {
         assertTrue(MkvSubtitles.isMkv(byteArrayOf(0x1A, 0x45, 0xDF.toByte(), 0xA3.toByte(), 0, 0)))
         assertFalse(MkvSubtitles.isMkv("....ftypisom".toByteArray()))
+    }
+
+    @Test
+    fun `nul-padded language is trimmed`() {
+        val entry = element(
+            0xAE,
+            uint(0xD7, 2),
+            uint(0x83, 0x11),
+            str(0x86, "S_TEXT/UTF8"),
+            element(0x22B59C, "hun".toByteArray() + byteArrayOf(0, 0)), // NUL-padded EBML string
+        )
+        val listed = MkvSubtitles.listTracks(ByteArrayInputStream(mkv(header, element(0x1654AE6B, entry))))
+        assertEquals("hun", listed.single().language)
+    }
+
+    @Test
+    fun `truncated file yields the cues collected so far`() {
+        val data = mkv(
+            header, tracks,
+            element(
+                0x1F43B675,
+                uint(0xE7, 0),
+                blockGroup(2, 0, durationMs = 1000, text = "kept"),
+                blockGroup(2, 5000, durationMs = 1000, text = "lost to truncation"),
+            ),
+        )
+        val cues = MkvSubtitles.extract(ByteArrayInputStream(data.copyOf(data.size - 6)), srtTrack)
+        assertEquals(listOf("kept"), cues.map { it.text })
+    }
+
+    // ------------------------------------------------------- cues index route
+
+    private fun uintFixed(id: Long, value: Long, width: Int): ByteArray =
+        element(id, ByteArray(width) { i -> (value shr (8 * (width - 1 - i))).toByte() })
+
+    private fun seekHeadToCues(cuesPos: Long): ByteArray = element(
+        0x114D9B74,
+        element(
+            0x4DBB,
+            element(0x53AB, byteArrayOf(0x1C, 0x53, 0xBB.toByte(), 0x6B)) +
+                uintFixed(0x53AC, cuesPos, 8), // fixed width keeps SeekHead length stable
+        ),
+    )
+
+    private fun cuePoint(timeMs: Long, track: Int, clusterPos: Long, relPos: Long?, durationMs: Long?) =
+        element(
+            0xBB,
+            uint(0xB3, timeMs) + element(
+                0xB7,
+                uint(0xF7, track.toLong()) + uint(0xF1, clusterPos) +
+                    (relPos?.let { uint(0xF0, it) } ?: ByteArray(0)) +
+                    (durationMs?.let { uint(0xB2, it) } ?: ByteArray(0)),
+            ),
+        )
+
+    private fun File.extractSrt(): List<SubtitleConverter.Cue> =
+        FileInputStream(this).use { MkvSubtitles.extract(it, srtTrack) }
+
+    private fun tempMkv(bytes: ByteArray): File =
+        File.createTempFile("mkvtest", ".mkv").apply { writeBytes(bytes); deleteOnExit() }
+
+    @Test
+    fun `cues index route reads only the indexed blocks`() {
+        val timestamp = uint(0xE7, 0)
+        val decoy = simpleBlock(2, 100, "decoy: in the track but not indexed")
+        val indexed = blockGroup(2, 500, durationMs = 1200, text = "indexed")
+        val cluster = element(0x1F43B675, timestamp, decoy, indexed)
+        val shLen = seekHeadToCues(0).size.toLong()
+        val clusterPos = shLen + header.size + tracks.size
+        val cuesPos = clusterPos + cluster.size
+        val relPos = (timestamp.size + decoy.size).toLong()
+        val cues = element(0x1C53BB6B, cuePoint(500, 2, clusterPos, relPos, durationMs = null))
+        val file = tempMkv(mkv(seekHeadToCues(cuesPos), header, tracks, cluster, cues))
+        // The decoy's absence proves the index route ran instead of the scan.
+        assertEquals(
+            listOf(SubtitleConverter.Cue(500, 1700, "indexed")),
+            file.extractSrt(),
+        )
+    }
+
+    @Test
+    fun `cue duration substitutes for a missing block duration`() {
+        val timestamp = uint(0xE7, 0)
+        val block = simpleBlock(2, 700, "no group duration")
+        val cluster = element(0x1F43B675, timestamp, block)
+        val shLen = seekHeadToCues(0).size.toLong()
+        val clusterPos = shLen + header.size + tracks.size
+        val cuesPos = clusterPos + cluster.size
+        val cues = element(0x1C53BB6B, cuePoint(700, 2, clusterPos, timestamp.size.toLong(), durationMs = 2500))
+        val file = tempMkv(mkv(seekHeadToCues(cuesPos), header, tracks, cluster, cues))
+        assertEquals(
+            listOf(SubtitleConverter.Cue(700, 3200, "no group duration")),
+            file.extractSrt(),
+        )
+    }
+
+    @Test
+    fun `bogus cues position falls back to the full scan`() {
+        val cluster = element(
+            0x1F43B675,
+            uint(0xE7, 0),
+            simpleBlock(2, 100, "one"),
+            blockGroup(2, 900, durationMs = 800, text = "two"),
+        )
+        // SeekHead points into the middle of the cluster — not a Cues element.
+        val file = tempMkv(mkv(seekHeadToCues(5), header, tracks, cluster))
+        assertEquals(listOf("one", "two"), file.extractSrt().map { it.text })
+    }
+
+    @Test
+    fun `index without relative positions scans just that cluster`() {
+        val timestamp = uint(0xE7, 0)
+        val cluster = element(
+            0x1F43B675,
+            timestamp,
+            blockGroup(2, 300, durationMs = 600, text = "found by cluster scan"),
+        )
+        val shLen = seekHeadToCues(0).size.toLong()
+        val clusterPos = shLen + header.size + tracks.size
+        val cuesPos = clusterPos + cluster.size
+        val cues = element(0x1C53BB6B, cuePoint(300, 2, clusterPos, relPos = null, durationMs = null))
+        val file = tempMkv(mkv(seekHeadToCues(cuesPos), header, tracks, cluster, cues))
+        assertEquals(
+            listOf(SubtitleConverter.Cue(300, 900, "found by cluster scan")),
+            file.extractSrt(),
+        )
     }
 }

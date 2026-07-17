@@ -50,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private val videoName by lazy { findViewById<TextView>(R.id.video_name) }
     private val stepSubtitles by lazy { findViewById<TextView>(R.id.step_subtitles) }
     private val subtitleName by lazy { findViewById<TextView>(R.id.subtitle_name) }
+    private val extractProgress by lazy { findViewById<View>(R.id.extract_progress) }
     private val clearSubtitle by lazy { findViewById<Button>(R.id.clear_subtitle) }
     private val searchSubtitles by lazy { findViewById<Button>(R.id.search_subtitles) }
     private val embeddedSubtitles by lazy { findViewById<Button>(R.id.embedded_subtitles) }
@@ -71,6 +72,11 @@ class MainActivity : AppCompatActivity() {
         TypedValue().also { theme.resolveAttribute(androidx.appcompat.R.attr.colorError, it, true) }.data
     }
     private val neutralStatusColors by lazy { statusView.textColors }
+    private val primaryTextColors by lazy { subtitleName.textColors }
+    private val secondaryTextColors by lazy {
+        TypedValue().also { theme.resolveAttribute(android.R.attr.textColorSecondary, it, true) }
+            .let { ContextCompat.getColorStateList(this, it.resourceId) }
+    }
 
     private var searchDialog: SearchDialog? = null
     private var introShown = false
@@ -102,7 +108,10 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.stop).onClick(vm::stopCasting)
         searchSubtitles.onClick(vm::openSearch)
         embeddedSubtitles.onClick(::showEmbeddedTracksDialog)
-        clearSubtitle.onClick(vm::clearSubtitle)
+        // ✕ doubles as cancel while an embedded track is being extracted.
+        clearSubtitle.onClick {
+            if (vm.state.value.extracting != null) vm.cancelExtraction() else vm.clearSubtitle()
+        }
         playOnTvButton.onClick(vm::startCasting)
         playPause.onClick(vm::togglePlayPause)
         rewind.onClick { vm.seekBy(-10_000) }
@@ -151,14 +160,21 @@ class MainActivity : AppCompatActivity() {
         stepVideo.text = getString(R.string.step_video).withCheck(video != null)
         videoName.text = video?.let { "${it.name} (${it.sizeBytes.toHumanSize()})" }
             ?: getString(R.string.no_video)
+        videoName.setTextColor(if (video == null) secondaryTextColors else primaryTextColors)
         stepSubtitles.text = getString(R.string.step_subtitles).withCheck(subtitle != null)
         subtitleName.text = when {
-            extracting -> getString(R.string.extracting_subtitles)
+            extracting != null -> getString(R.string.extracting_subtitles, extracting)
             else -> subtitle?.name ?: getString(R.string.no_subtitles)
         }
-        clearSubtitle.isVisible = subtitle != null
+        subtitleName.setTextColor(
+            if (subtitle == null && extracting == null) secondaryTextColors else primaryTextColors
+        )
+        extractProgress.isVisible = extracting != null
+        clearSubtitle.isVisible = subtitle != null || extracting != null
+        clearSubtitle.contentDescription =
+            getString(if (extracting != null) R.string.cancel_extraction else R.string.clear_subtitle)
         searchSubtitles.isEnabled = video != null
-        embeddedSubtitles.isEnabled = embeddedTracks.isNotEmpty() && !extracting
+        embeddedSubtitles.isEnabled = embeddedTracks.isNotEmpty() && extracting == null
         stepChromecast.text = getString(R.string.step_chromecast).withCheck(cast.connected)
         deviceStatus.text = when {
             cast.connected -> cast.deviceName ?: getString(R.string.connecting)
@@ -212,6 +228,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun showEmbeddedTracksDialog() {
         val tracks = vm.state.value.embeddedTracks.ifEmpty { return }
+        // One obvious track shouldn't cost a dialog round-trip.
+        tracks.singleOrNull()?.let { return vm.pickEmbeddedTrack(it) }
         AlertDialog.Builder(this)
             .setTitle(R.string.embedded_dialog_title)
             .setItems(tracks.map { it.label }.toTypedArray()) { _, index ->

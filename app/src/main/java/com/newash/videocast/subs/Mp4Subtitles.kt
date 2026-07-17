@@ -8,8 +8,10 @@ import java.nio.ByteBuffer
 
 /**
  * Embedded MP4 timed-text (tx3g / "mov_text") subtitle tracks via the platform
- * MediaExtractor. Unlike MKV, this is sample-table driven: selecting only the
- * text track reads kilobytes regardless of file size.
+ * MediaExtractor. Sample-table driven: listing tracks reads only the moov box,
+ * and extraction preads just the text track's samples — kilobytes on local
+ * files. (On network-backed files the samples' spread still pulls much of the
+ * file through the provider's read-ahead; user-invoked, spinner-guarded.)
  */
 object Mp4Subtitles {
 

@@ -12,11 +12,13 @@
     <string name="no_video">No video selected</string>
     <string name="no_subtitles">None</string>
     <string name="pick_video">Pick video</string>
-    <string name="pick_file">Pick file</string>
+    <string name="pick_file">From file</string>
+    <string name="search_online">Online</string>
     <string name="opensubtitles">OpenSubtitles</string>
     <string name="embedded_subtitles">In video</string>
-    <string name="embedded_dialog_title">Subtitles in the video</string>
-    <string name="extracting_subtitles">Extracting subtitles…</string>
+    <string name="embedded_dialog_title">Subtitles in this video</string>
+    <string name="extracting_subtitles">Extracting %1$s…</string>
+    <string name="cancel_extraction">Cancel extraction</string>
     <string name="clear_subtitle">Remove subtitle</string>
 
     <string name="not_connected">Not connected — tap the cast icon above</string>

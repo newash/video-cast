@@ -146,16 +146,23 @@ Candidates considered:
   files, so embedded text tracks are extracted on the phone and served as the
   sidecar like any other source. MP4 (tx3g timed text) goes through the
   platform `MediaExtractor` — sample-table driven, reads only the text
-  track's bytes. MKV needs `MkvSubtitles`, a ~300-line hand-rolled EBML
-  walker (SRT/ASS/VTT codecs, track language + title), because Android's
-  Matroska extractor enumerates only video and audio tracks — subtitle
-  tracks are silently dropped, on every Android version. The walker
-  read-skips non-subtitle blocks below a seek threshold so network-backed
-  SAF files stream mostly sequentially instead of forcing remote reopens.
-  Cheap header probe at pick time decides whether the "In video" button
-  lights up; extraction happens only when a track is chosen. The last used
-  subtitle language (one value, shared with OpenSubtitles search) is the
-  only persisted preference.
+  track's bytes. MKV needs `MkvSubtitles`, a hand-rolled EBML walker
+  (SRT/ASS/VTT codecs, track language + title), because Android's Matroska
+  extractor enumerates only video and audio tracks — subtitle tracks are
+  silently dropped, on every Android version. Extraction prefers the MKV
+  **Cues index** (SeekHead → Cues; the spec says every subtitle frame
+  SHOULD be indexed with CueRelativePosition, and mkvmerge/ffmpeg do so by
+  default): on a seekable descriptor it jumps straight to the indexed
+  subtitle blocks and reads well under 1% of the file. Files without a
+  usable index fall back to a full cluster scan whose skip-vs-read
+  threshold is calibrated from the measured seek cost — network-backed
+  providers (seconds per out-of-order read) stay near-sequential, local
+  files seek freely. Cheap header probe at pick time decides whether the
+  "In video" button lights up; extraction happens only when a track is
+  chosen, is cancellable (✕), and interrupt checks in the read loops make
+  cancellation actually stop the I/O. The last used subtitle language (one
+  value, shared with OpenSubtitles search) is the only persisted
+  preference.
 - **Casting the track**: `MediaTrack(id=1, TYPE_TEXT, SUBTYPE_SUBTITLES,
   contentId=http://…/subs.vtt, contentType=text/vtt)` attached to
   `MediaInfo`, activated via `setActiveTrackIds([1])` on the load request —

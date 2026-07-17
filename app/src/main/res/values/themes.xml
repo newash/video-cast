@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Must descend from AppCompat for the MediaRouter cast dialog. -->
-    <style name="Theme.VideoCast" parent="Theme.AppCompat.DayNight.NoActionBar" />
+    <style name="Theme.VideoCast" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <!-- MD3 dropped shouting buttons in 2021; sentence case app-wide. -->
+        <item name="android:buttonStyle">@style/AppButton</item>
+        <item name="buttonStyle">@style/AppButton</item>
+    </style>
 </resources>

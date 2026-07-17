@@ -34,8 +34,11 @@ class MediaServer(private val context: Context, val port: Int) {
         getVirtualHost(null).run {
             // Registering OPTIONS routes CORS preflights through our handlers
             // instead of JLHTTP's default OPTIONS response (which lacks CORS).
-            addContext(VIDEO_PATH, cors(::serveVideo), "GET", "OPTIONS")
-            addContext(SUBTITLE_PATH, cors(::serveSubtitles), "GET", "OPTIONS")
+            // HEAD is registered too: JLHTTP's default HEAD handler rewrites the
+            // method to GET, which would make serveVideo open the content stream
+            // for a body that is never sent.
+            addContext(VIDEO_PATH, cors(::serveVideo), "GET", "HEAD", "OPTIONS")
+            addContext(SUBTITLE_PATH, cors(::serveSubtitles), "GET", "HEAD", "OPTIONS")
         }
     }
 
@@ -77,6 +80,10 @@ class MediaServer(private val context: Context, val port: Int) {
             resp.headers.add("Content-Range", "bytes */$total")
             return 416
         }
+        if (req.method == "HEAD") { // headers only: don't open content for a body we won't send
+            resp.sendHeaders(200, total, -1, null, video.mime, range)
+            return 0
+        }
         // Open the content before committing headers: after sendHeaders a failure
         // can only abort the connection, not produce an error response.
         val stream = try {
@@ -101,6 +108,8 @@ class MediaServer(private val context: Context, val port: Int) {
      * IOException("Illegal seek") — fall back to reading in both cases.
      */
     private class SkipByReadingInputStream(delegate: InputStream) : FilterInputStream(delegate) {
+        private val scratch = ByteArray(64 * 1024) // reused: pipe seeks skip() thousands of times
+
         override fun skip(n: Long): Long {
             if (n <= 0) return 0
             val skipped = try {
@@ -109,8 +118,7 @@ class MediaServer(private val context: Context, val port: Int) {
                 0L
             }
             if (skipped > 0) return skipped
-            val buffer = ByteArray(minOf(n, 64L * 1024).toInt())
-            val read = read(buffer)
+            val read = read(scratch, 0, minOf(n, scratch.size.toLong()).toInt())
             return if (read < 0) 0 else read.toLong()
         }
     }
