@@ -42,8 +42,8 @@ pieces alive and controllable.
 │   ├─ Cast button (MediaRouteButton)    (single UiState flow)     │
 │   └─ transport controls ────────────► CastPlayer ────────────────┼──► Cast SDK
 │                                          │  load(MediaInfo +     │    (session,
-│  StreamingService (foreground)           │   MediaTrack[VTT])    │     RemoteMediaClient,
-│   └─ owns MediaServer (JLHTTP)          │                       │     media notification)
+│  StreamingService (locks + fg notif)     │   MediaTrack[VTT])    │     RemoteMediaClient,
+│  MediaServer (JLHTTP, ViewModel-owned)   │                       │     media notification)
 │        GET /video      ◄─────────────────┼───────────────────────┼──◄ Chromecast fetches
 │        GET /subs.vtt   ◄─────────────────┘                       │    Range + CORS
 │                                                                  │
@@ -237,10 +237,11 @@ keeps the process — and with it the ViewModel-owned JLHTTP instance —
 alive, holding a `WifiLock` (`FULL_HIGH_PERF`) and a partial wake lock. The Cast
 framework's own `MediaNotificationService` provides the rich media
 notification with transport controls; the service's own notification exists
-only to satisfy the foreground requirement. The service starts when casting
-begins and stops — releasing locks and server — when the Cast session
-terminally ends; transient suspensions (brief Wi-Fi drops) keep it alive so
-playback can recover.
+only to satisfy the foreground requirement. Both start when casting begins
+and stop when the Cast session terminally ends — the service releasing its
+locks, the ViewModel its server: no battery spent after the movie. Transient
+suspensions (brief Wi-Fi drops) keep everything alive so playback can
+recover.
 
 Control from the TV remote needs no phone involvement: CEC goes to the
 Chromecast and the receiver handles play/pause/seek itself. The phone only
