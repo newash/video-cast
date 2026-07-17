@@ -11,6 +11,8 @@ import com.google.android.gms.cast.framework.CastSession
 import com.google.android.gms.cast.framework.CastState
 import com.google.android.gms.cast.framework.SessionManagerListener
 import com.google.android.gms.cast.framework.media.RemoteMediaClient
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 /**
  * Thin wrapper around the Cast SDK: session tracking, loading media with an
@@ -69,19 +71,19 @@ class CastPlayer(
         castContext.sessionManager.removeSessionManagerListener(sessionListener, CastSession::class.java)
 
     /**
-     * Loads the video, optionally with a subtitle track active from the start.
-     * The track list is immutable after load (a Cast SDK rule): a subtitle
-     * arriving later means reloading via [startPositionMs].
+     * Loads the video, optionally with a subtitle track active from the start,
+     * and suspends until the receiver's verdict: null on success, else the
+     * error. The track list is immutable after load (a Cast SDK rule): a
+     * subtitle arriving later means reloading via [startPositionMs].
      */
-    fun load(
+    suspend fun load(
         videoUrl: String,
         mime: String,
         title: String,
         subtitleUrl: String?,
         subtitleLanguage: String,
         startPositionMs: Long = 0,
-        onResult: (error: String?) -> Unit,
-    ) {
+    ): String? {
         val client = checkNotNull(remote) { "No Chromecast session" }
         val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
             putString(MediaMetadata.KEY_TITLE, title)
@@ -111,12 +113,15 @@ class CastPlayer(
             // than toggling it afterwards on the default receiver.
             .setActiveTrackIds(if (subtitleUrl != null) longArrayOf(SUBTITLE_TRACK_ID) else longArrayOf())
             .build()
-        // Receiver-side rejections must not be silent: surface the result.
-        client.load(request).setResultCallback { result ->
-            onResult(
-                if (result.status.isSuccess) null
-                else result.status.statusMessage ?: "receiver rejected the load (${result.status.statusCode})"
-            )
+        // Receiver-side rejections must not be silent: surface the result. A
+        // cancelled caller (superseded load) just drops the late verdict.
+        return suspendCancellableCoroutine { cont ->
+            client.load(request).setResultCallback { result ->
+                if (cont.isActive) cont.resume(
+                    if (result.status.isSuccess) null
+                    else result.status.statusMessage ?: "receiver rejected the load (${result.status.statusCode})"
+                )
+            }
         }
     }
 

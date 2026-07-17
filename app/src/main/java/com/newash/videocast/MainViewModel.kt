@@ -50,7 +50,7 @@ data class SubtitleTrack(
 )
 
 /** A running subtitle acquisition (extraction or slow read), shown on the subtitle line. */
-data class Extraction(val label: String, val auto: Boolean, val percent: Int? = null)
+data class Extraction(val label: String, val auto: Boolean, val percent: Int? = null, val runId: Int = 0)
 
 data class SearchState(
     val results: List<OpenSubtitlesClient.Result> = emptyList(),
@@ -139,34 +139,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }?.also { server = it } ?: throw (lastError ?: IOException("could not start media server"))
     }
 
+    /**
+     * One subtitle acquisition run — everything the run owns, cancellable as a
+     * unit. Per-run ownership is the concurrency model: a lagging cancelled
+     * run (blocked network read) can only ever touch its own object, so no
+     * cross-run identity checks are needed. Supersession = cancel + replace,
+     * atomic on Main.
+     */
+    private class Acquisition(val runId: Int) {
+        lateinit var job: Job
+
+        /** The open stream — closed from outside to abort a blocked read. */
+        val stream = AtomicReference<AutoCloseable?>()
+
+        /** Cues-so-far of an MKV extraction, published at block boundaries on the IO thread. */
+        @Volatile
+        var cues: List<SubtitleConverter.Cue>? = null
+
+        /** True when a cast went out carrying this run's partial cues. */
+        var prefixCast = false
+
+        fun cancel() {
+            job.cancel()
+            stream.getAndSet(null)?.let { runCatching(it::close) }
+        }
+    }
+
+    private var acquisition: Acquisition? = null
+    private var nextRunId = 0
+
     private var searchJob: Job? = null
     private var probeJob: Job? = null
-    private var acquireJob: Job? = null
-    private var pickJob: Job? = null
 
-    /** Bumped per load request: only the newest load's verdict may act on shared state. */
-    private var loadVersion = 0
+    /** The auto-select chain. Any explicit subtitle action cancels it — the
+     * app's guess must never race the user's choice. */
+    private var autoJob: Job? = null
 
-    /** The acquisition's open stream — closed from outside to abort a blocked read. */
-    private val acquisitionStream = AtomicReference<AutoCloseable?>()
+    /** The one load in flight: starting a new cast cancels it, so a superseded
+     * load's verdict never acts. */
+    private var castJob: Job? = null
 
     /** Bumped per subtitle change: a fresh ?v= makes the receiver re-fetch on reload. */
     private var vttVersion = 0
-
-    /**
-     * Cues-so-far of a running MKV extraction, published at block boundaries
-     * on the extraction thread. One holder per run: a lagging cancelled run
-     * writes into its own dead holder, never the successor's.
-     */
-    private class CuesSoFar {
-        @Volatile
-        var cues: List<SubtitleConverter.Cue> = emptyList()
-    }
-
-    private var extractionCues: CuesSoFar? = null
-
-    /** True when a cast went out carrying the running extraction's partial cues. */
-    private var prefixCast = false
 
     private val prefs get() = app.getSharedPreferences("videocast", Context.MODE_PRIVATE)
 
@@ -193,8 +207,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             while (isActive) {
                 if (_state.subscriptionCount.value > 0) {
                     runCatching(player::progress).onSuccess { p ->
-                        // loading clears in onLoadResult — old media lingering through
-                        // a re-cast must not re-enable Play mid-load.
+                        // loading clears when the load's verdict lands — old media
+                        // lingering through a re-cast must not re-enable Play mid-load.
                         _state.update { it.copy(cast = p) }
                     }
                 }
@@ -226,9 +240,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ------------------------------------------------------------ video pick
 
     fun onVideoPicked(uri: Uri) {
-        cancelAcquisition() // a previous video's slow acquisition must not land on this one
-        pickJob?.cancel()
-        pickJob = viewModelScope.launch {
+        cancelAcquisition() // a previous video's acquisition (or pending guess) must not land on this one
+        probeJob?.cancel()
+        probeJob = viewModelScope.launch {
             // DocumentsProvider queries are cross-process IPC — keep them off Main.
             val video = withContext(Dispatchers.IO) { app.contentResolver.describeVideo(uri) }
             _state.update {
@@ -246,27 +260,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     },
                 )
             }
-            probeEmbeddedTracks(uri)
+            probeAndAutoSelect(uri)
         }
     }
 
-    /** Container-header probe: cheap even for network files, so failures stay silent. */
-    private fun probeEmbeddedTracks(uri: Uri) {
-        probeJob?.cancel()
-        probeJob = viewModelScope.launch {
-            val preferred = rememberedLanguageTag
-            // runInterruptible: cancellation must actually stop the blocking reads —
-            // and must pass through, not be swallowed into an empty result.
-            val tracks = try {
-                runInterruptible(Dispatchers.IO) { EmbeddedSubtitles.listTracks(app, uri) }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                emptyList()
-            }.sortedByDescending { LanguageTag.matches(it.language, preferred) }
-            updateIfCurrent(uri) { it.copy(embeddedTracks = tracks) }
-            autoSelectSubtitle(uri, tracks, preferred)
-        }
+    /**
+     * Container-header probe (cheap even for network files, so failures stay
+     * silent), then the auto-select chain. The chain runs in its own [autoJob]
+     * so an explicit subtitle action can kill the guess without killing the
+     * probe — the "In video" button must still light up.
+     */
+    private suspend fun probeAndAutoSelect(uri: Uri) {
+        val preferred = rememberedLanguageTag
+        // runInterruptible: cancellation must actually stop the blocking reads —
+        // and must pass through, not be swallowed into an empty result.
+        val tracks = try {
+            runInterruptible(Dispatchers.IO) { EmbeddedSubtitles.listTracks(app, uri) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            emptyList()
+        }.sortedByDescending { LanguageTag.matches(it.language, preferred) }
+        updateIfCurrent(uri) { it.copy(embeddedTracks = tracks) }
+        autoJob = viewModelScope.launch { autoSelectSubtitle(uri, tracks, preferred) }
     }
 
     // ----------------------------------------------------------- auto-select
@@ -277,10 +293,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * in the saved language. Sibling lookup needs a persisted folder grant; when
      * it's missing, the embedded rule still applies and the status line offers
      * the one-time grant.
+     *
+     * Runs inside [autoJob], which every explicit subtitle action cancels — so
+     * past the entry check, the guess cannot race the user's choice.
      */
     private suspend fun autoSelectSubtitle(uri: Uri, tracks: List<EmbeddedSubtitles.Track>, lang: String) {
+        // The guess fills a vacuum only: a subtitle chosen (or being acquired)
+        // before this job even started wins outright.
+        if (_state.value.subtitle != null || acquisition?.job?.isActive == true) return
         val video = _state.value.video?.takeIf { it.uri == uri } ?: return
-        val subtitleBefore = _state.value.subtitle
         val sibling = try {
             runInterruptible(Dispatchers.IO) {
                 SiblingSubtitles.find(app, video.uri, video.name, LanguageTag.fileNameTags(lang))
@@ -290,8 +311,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } catch (_: Exception) {
             SiblingSubtitles.Result.None
         }
-        // A newer pick, or a subtitle the user chose meanwhile, wins over the guess.
-        if (_state.value.video?.uri != uri || _state.value.subtitle !== subtitleBefore) return
         // Rules 1–2 blocked by the sandbox: offer the grant even when rule 3
         // lands, since a granted folder would outrank the embedded pick next time.
         if (sibling is SiblingSubtitles.Result.NoAccess) {
@@ -311,7 +330,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             app.contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         _state.update { it.copy(subtitleFolderHint = null) }
-        _state.value.video?.uri?.let(::probeEmbeddedTracks)
+        val uri = _state.value.video?.uri ?: return
+        probeJob?.cancel()
+        probeJob = viewModelScope.launch { probeAndAutoSelect(uri) }
     }
 
     // -------------------------------------------------- subtitle acquisition
@@ -332,27 +353,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun acquireSubtitle(
         auto: Boolean = false,
         progress: String? = null,
-        cues: CuesSoFar? = null,
         onError: (Exception) -> Unit = { e ->
             _state.update { it.copy(subtitleError = "Subtitle error: ${e.message}") }
         },
         onApplied: () -> Unit = {},
-        fetch: suspend () -> SubtitleTrack,
+        fetch: suspend (Acquisition) -> SubtitleTrack,
     ): Job? {
-        if (auto && acquireJob?.isActive == true) return null
+        // Explicit picks supersede anything, including the pending guess. Auto
+        // picks only ever start from autoJob, which every explicit action has
+        // already cancelled — so they can never kill the user's choice.
         if (!auto) cancelAcquisition()
-        extractionCues = cues
-        prefixCast = false
+        val run = Acquisition(++nextRunId)
+        acquisition = run
         val videoUri = _state.value.video?.uri
-        val previous = acquireJob
-        return viewModelScope.launch {
-            previous?.join() // serializes the progress-state hand-off
-            _state.update { it.copy(extraction = progress?.let { p -> Extraction(p, auto) }, subtitleError = null) }
+        run.job = viewModelScope.launch {
+            _state.update {
+                it.copy(extraction = progress?.let { p -> Extraction(p, auto, runId = run.runId) }, subtitleError = null)
+            }
             try {
-                // A stream closed by cancelAcquisition surfaces as IOException before
-                // the cancellation does — that must not read as a failure.
+                // A stream closed by Acquisition.cancel surfaces as IOException
+                // before the cancellation does — that must not read as a failure.
                 reporting({ e -> if (isActive) onError(e) }) {
-                    val track = withContext(Dispatchers.IO) { fetch() }
+                    val track = withContext(Dispatchers.IO) { fetch(run) }
                     // An explicit pick in a known language becomes the preference.
                     if (!auto) track.language?.let { rememberedLanguages = it }
                     // Only apply to the still-current video (picks race async work).
@@ -364,51 +386,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             } finally {
-                // A cancelled run's finally can lag past its successor's start (blocked
-                // IO): only the still-current run owns the stream slot and progress line.
-                if (acquireJob === coroutineContext[Job]) {
-                    acquisitionStream.set(null)
-                    _state.update { it.copy(extraction = null) }
-                }
-                if (extractionCues === cues) extractionCues = null
+                // A cancelled run's finally can lag past its successor's start
+                // (blocked IO). Everything here is the run's own — except the
+                // shared progress line, cleared only while still tagged as ours.
+                run.stream.set(null)
+                _state.update { if (it.extraction?.runId == run.runId) it.copy(extraction = null) else it }
+                if (acquisition === run) acquisition = null
             }
-        }.also { acquireJob = it }
+        }
+        return run.job
     }
 
-    /** Cancels the running acquisition and unblocks any stalled read by closing its stream. */
+    /** Cancels the pending guess and the running acquisition, unblocking any stalled read. */
     fun cancelAcquisition() {
-        acquireJob?.cancel()
-        acquisitionStream.getAndSet(null)?.let { stream -> runCatching { stream.close() } }
-        extractionCues = null // the dead run's cues must not serve a later Play
+        autoJob?.cancel()
+        acquisition?.cancel()
+        acquisition = null
     }
 
     fun pickEmbeddedTrack(track: EmbeddedSubtitles.Track, auto: Boolean = false) {
         val video = _state.value.video ?: return
-        // Only MKV extraction is incremental; MP4 has no cues to publish early.
-        val holder = CuesSoFar().takeIf { track.container == EmbeddedSubtitles.Container.MKV }
         acquireSubtitle(
             auto = auto,
             progress = track.label,
-            cues = holder,
             onError = { e ->
-                val partial = if (prefixCast) " — the TV keeps the partial subtitles" else ""
+                // Only the still-current run reaches onError, so this is our own flag.
+                val partial = if (acquisition?.prefixCast == true) " — the TV keeps the partial subtitles" else ""
                 _state.update {
                     it.copy(subtitleError = "Extraction failed (${track.label}): ${e.message}$partial")
                 }
             },
-        ) {
+        ) { run ->
             val vtt = runInterruptible {
                 EmbeddedSubtitles.extractVtt(
                     app, video.uri, track,
-                    onOpen = acquisitionStream::set,
+                    onOpen = run.stream::set,
                     onProgress = { percent ->
                         _state.update { state ->
-                            state.extraction?.takeIf { it.label == track.label }
+                            state.extraction?.takeIf { it.runId == run.runId }
                                 ?.let { state.copy(extraction = it.copy(percent = percent)) }
                                 ?: state
                         }
                     },
-                    onCues = holder?.let { h -> { cues -> h.cues = cues } },
+                    onCues = { cues -> run.cues = cues },
                 )
             }
             SubtitleTrack(track.plainLabel, vtt, track.language, SubtitleSource.EMBEDDED, auto)
@@ -416,11 +436,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onSubtitlePicked(uri: Uri, auto: Boolean = false) {
-        acquireSubtitle(auto = auto, progress = "subtitle file") {
+        acquireSubtitle(auto = auto, progress = "subtitle file") { run ->
             runInterruptible {
                 val name = app.contentResolver.displayName(uri) ?: "subtitle file"
                 // Registered so ✕ or a superseding pick can abort a stalled network read.
-                val bytes = app.contentResolver.openInputStream(uri)?.also(acquisitionStream::set)
+                val bytes = app.contentResolver.openInputStream(uri)?.also(run.stream::set)
                     ?.use { it.readAtMost(MAX_SUBTITLE_BYTES) }
                     ?: error("cannot read subtitle file")
                 // The filename's own language token; untagged files stay honestly unknown.
@@ -519,9 +539,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (video.sizeBytes <= 0) return
         val player = castPlayer
             ?: return _state.update { it.copy(note = "Google Cast is unavailable on this device") }
-        viewModelScope.launch {
+        castJob?.cancel() // the superseded load's verdict must not act
+        castJob = viewModelScope.launch {
             _state.update { it.copy(loading = true, note = null) }
-            reporting({ e -> onLoadResult(e.message ?: "unknown error") }) {
+            reporting({ e -> loadFailed(e.message ?: "unknown error") }) {
                 StreamingService.start(app)
                 val (ip, server) = withContext(Dispatchers.IO) {
                     (localIpv4() ?: error("No Wi-Fi/LAN address found")) to ensureServer()
@@ -535,17 +556,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@reporting
                 }
                 val subtitlePending = current.subtitle == null && current.extraction != null
-                val prefixVtt = extractionCues?.cues
+                val run = acquisition
+                val prefixVtt = run?.cues
                     ?.takeIf { subtitlePending && it.isNotEmpty() }
                     ?.let(SubtitleConverter::cuesToVtt)
-                prefixCast = prefixVtt != null
+                if (prefixVtt != null) run.prefixCast = true
                 server.video = MediaServer.Video(video.uri, video.mime, video.sizeBytes)
                 // null → the subtitle route serves a valid empty VTT by itself.
                 server.subtitleVtt = current.subtitle?.vtt ?: prefixVtt
                 val base = "http://$ip:${server.port}"
                 vttVersion++
-                val version = ++loadVersion // a superseded load's verdict must not act
-                player.load(
+                val error = player.load(
                     videoUrl = base + MediaServer.VIDEO_PATH,
                     mime = video.mime,
                     title = video.name,
@@ -553,10 +574,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         .takeIf { current.subtitle != null || subtitlePending },
                     subtitleLanguage = current.subtitle?.language ?: rememberedLanguageTag,
                     startPositionMs = resumeAtMs,
-                    onResult = { error ->
-                        if (version == loadVersion) onLoadResult(error, video, current.subtitle?.name)
-                    },
                 )
+                if (error != null) return@reporting loadFailed(error)
+                _state.update {
+                    it.copy(loading = false, castVideo = video, castSubtitle = current.subtitle?.name)
+                }
+                // A subtitle that arrived during the load round-trip missed its
+                // auto-re-cast (castVideo wasn't recorded yet) — catch it up now.
+                val subtitle = _state.value.subtitle
+                if (subtitle != null && subtitle.name != current.subtitle?.name) recastWithSubtitle()
             }
         }
     }
@@ -575,16 +601,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (progress.hasMedia) startCasting(resumeAtMs = progress.positionMs)
     }
 
-    /** The receiver's verdict on a load: record what's live on it, or clean up. */
-    private fun onLoadResult(error: String?, video: VideoFile? = null, subtitleName: String? = null) {
-        if (error == null) {
-            _state.update { it.copy(loading = false, castVideo = video, castSubtitle = subtitleName) }
-            // A subtitle that arrived during the load round-trip missed its
-            // auto-re-cast (castVideo wasn't recorded yet) — catch it up now.
-            val subtitle = _state.value.subtitle
-            if (subtitle != null && subtitle.name != subtitleName) recastWithSubtitle()
-            return
-        }
+    private fun loadFailed(error: String) {
         // Clean up only when idle — a still-playing previous cast keeps its server.
         if (!_state.value.cast.hasMedia) stopStreaming()
         _state.update { it.copy(loading = false, note = "Cast failed: $error") }

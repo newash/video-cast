@@ -64,10 +64,9 @@ com.newash.videocast
 ├── MainActivity.kt            system-widget UI, SAF pickers, render(UiState)
 ├── MainViewModel.kt           single immutable UiState in a StateFlow (UDF)
 ├── CastOptionsProvider.kt     default receiver ID + notification options
-├── cast/CastPlayer.kt         session mgmt, load w/ tracks, play/pause/seek
+├── cast/CastPlayer.kt         session mgmt, suspend load w/ tracks, transport
 ├── server/MediaServer.kt      JLHTTP: /video (Range/206), /subs.vtt (CORS)
-├── server/ServerHolder.kt     process-wide server lifecycle + port fallback
-├── server/StreamingService.kt foreground service; wifi + wake locks
+├── server/StreamingService.kt foreground service; wifi + wake locks only
 ├── subs/SubtitleConverter.kt  SRT/ASS/VTT detection + conversion (unit tested)
 ├── subs/OpenSubtitlesClient.kt REST client: title search + anonymous download
 ├── subs/EmbeddedSubtitles.kt  container sniff + track facade over the two below
@@ -75,8 +74,7 @@ com.newash.videocast
 ├── subs/Mp4Subtitles.kt       tx3g timed text via platform MediaExtractor
 ├── subs/SiblingSubtitles.kt   sibling-file matcher + SAF tree lookup (tested)
 ├── subs/LanguageTag.kt        ISO 639 normalization/matching (tested)
-├── util/NetworkUtils.kt       LAN IPv4 discovery (prefer wlan)
-└── util/Streams.kt            bounded whole-stream read
+└── util/Util.kt               LAN IPv4 discovery; bounded whole-stream read
 ```
 
 ## Tech choices
@@ -138,12 +136,15 @@ process).
 
 Every subtitle — sibling file, OpenSubtitles download, embedded track —
 flows through a single ViewModel pipeline (`acquireSubtitle`); a source
-contributes only its fetch step. The pipeline owns everything the sources
-share:
+contributes only its fetch step. Each run owns everything it needs to be
+cancelled (job, open stream, published cues) in one `Acquisition` object,
+so a lagging cancelled run can only ever touch its own state. The pipeline
+owns everything the sources share:
 
 - **Supersession**: at most one acquisition runs; starting a new one cancels
-  the previous — except an *automatic* pick never cancels an *explicit* user
-  choice (the app's guess must not kill the user's action).
+  the previous — and an *automatic* pick can never cancel an *explicit* user
+  choice, structurally: the auto-select chain runs in its own job, which
+  every explicit subtitle action cancels first.
 - **Language memory**: explicit picks update the remembered languages
   (the app's only persisted preference, shared by auto-select and the
   OpenSubtitles search field); automatic picks don't.
@@ -205,12 +206,12 @@ extraction (minutes on a cold NAS file), cast-then-extract loses the
 subtitles of the opening scene, because the receiver fetches the sidecar
 once and the track list is immutable after load. The resolution:
 
-- Extraction starts at pick time, so by Play it has typically covered many
-  minutes of the file.
-- Play asks the running extraction for a snapshot of the cues collected so
-  far (emitted at the next block boundary — usually milliseconds; a ~4 s
-  gate bounds the wait) and loads with that snapshot as the active track.
-  Near-instant start, subtitles from 0:00.
+- Extraction starts at pick time and continuously publishes its cues-so-far
+  (a fresh list after each cluster, stored in a per-run volatile), so by
+  Play it has typically covered many minutes of the file.
+- Play simply reads the latest published list and loads with it as the
+  active track — no waiting at all. Near-instant start, subtitles from
+  0:00, even while the extractor sits in a blocked network read.
 - When the extraction completes mid-playback, the app reloads at the live
   position with a bumped `?v=` track URL — one short hiccup, then the
   complete cue set. The same reload path serves any subtitle picked or
@@ -232,8 +233,8 @@ reliable, toggling afterwards is not.
 ## Surviving screen-off
 
 `StreamingService` is a foreground service (`mediaPlayback` type) that
-keeps the process — and with it `ServerHolder`'s JLHTTP instance — alive,
-holding a `WifiLock` (`FULL_HIGH_PERF`) and a partial wake lock. The Cast
+keeps the process — and with it the ViewModel-owned JLHTTP instance —
+alive, holding a `WifiLock` (`FULL_HIGH_PERF`) and a partial wake lock. The Cast
 framework's own `MediaNotificationService` provides the rich media
 notification with transport controls; the service's own notification exists
 only to satisfy the foreground requirement. The service starts when casting
