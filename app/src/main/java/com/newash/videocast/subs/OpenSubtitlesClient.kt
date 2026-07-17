@@ -1,14 +1,13 @@
 package com.newash.videocast.subs
 
 import com.newash.videocast.BuildConfig
+import com.newash.videocast.util.readAtMost
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.IOException
-import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -91,18 +90,6 @@ class OpenSubtitlesClient(private val apiKey: String) {
         block()
     } catch (e: JSONException) {
         throw IOException("unexpected OpenSubtitles response: ${e.message}", e)
-    }
-
-    /** Bounded read: a wrong payload behind the download link must not balloon into an OOM. */
-    private fun InputStream.readAtMost(limit: Int): ByteArray {
-        val out = ByteArrayOutputStream()
-        val buffer = ByteArray(64 * 1024)
-        while (true) {
-            val read = read(buffer)
-            if (read < 0) return out.toByteArray()
-            out.write(buffer, 0, read)
-            if (out.size() > limit) throw IOException("subtitle download larger than $limit bytes")
-        }
     }
 
     private fun JSONArray.toResults(): List<Result> = (0 until length()).mapNotNull { i ->

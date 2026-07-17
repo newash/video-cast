@@ -37,8 +37,10 @@ three alive and controllable.
 │        GET /subs.vtt   ◄─────────────────┘                       │    Range + CORS
 │                                                                  │
 │  Subtitle pipeline                                               │
-│   ├─ SubtitleConverter: SRT/ASS → WebVTT                         │
-│   └─ OpenSubtitlesClient (api.opensubtitles.com, title search)   │
+│   ├─ SubtitleConverter: SRT/ASS → WebVTT (cues → VTT rendering)  │
+│   ├─ OpenSubtitlesClient (api.opensubtitles.com, title search)   │
+│   ├─ EmbeddedSubtitles: MKV (own EBML walker) + MP4 tracks       │
+│   └─ SiblingSubtitles: same-folder files via a SAF tree grant    │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -46,7 +48,7 @@ three alive and controllable.
 
 ```
 com.newash.videocast
-├── App.kt                     Application; notification channel
+├── App.kt                     Application; notification channel; crash file
 ├── MainActivity.kt            system-widget UI, SAF pickers, render(UiState)
 ├── MainViewModel.kt           single immutable UiState in a StateFlow (UDF)
 ├── CastOptionsProvider.kt     default receiver ID + notification options
@@ -56,7 +58,13 @@ com.newash.videocast
 ├── server/StreamingService.kt foreground service; wifi + wake locks
 ├── subs/SubtitleConverter.kt  SRT/ASS/VTT detection + conversion (unit tested)
 ├── subs/OpenSubtitlesClient.kt REST client: title search + anonymous download
-└── util/NetworkUtils.kt       LAN IPv4 discovery (prefer wlan)
+├── subs/EmbeddedSubtitles.kt  container sniff + track facade over the two below
+├── subs/MkvSubtitles.kt       hand-rolled EBML walker w/ Cues fast path (tested)
+├── subs/Mp4Subtitles.kt       tx3g timed text via platform MediaExtractor
+├── subs/SiblingSubtitles.kt   sibling-file matcher + SAF tree lookup (tested)
+├── subs/LanguageTag.kt        ISO 639 normalization/matching (tested)
+├── util/NetworkUtils.kt       LAN IPv4 discovery (prefer wlan)
+└── util/Streams.kt            bounded whole-stream read
 ```
 
 ## Tech choices
@@ -197,8 +205,11 @@ the app UI stays in sync by polling `RemoteMediaClient`.
 ## CI
 
 GitHub Actions (`.github/workflows/android.yml`): on every push, run the
-unit tests, build the debug APK, and upload it as a workflow artifact —
-that's the install channel for a personal app (no Play Store).
+unit tests and build the debug APK. Master builds also publish the APK to
+the rolling `latest` prerelease — that's the install channel (workflow
+artifacts expire and require a login; see README). Versions derive from
+git (`versionCode` = commit count) and builds are signed with the
+committed debug keystore so updates install over each other.
 
 ## Build plan — verifiable milestones
 

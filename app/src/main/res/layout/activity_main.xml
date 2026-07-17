@@ -74,12 +74,13 @@
                 android:minHeight="48dp"
                 android:orientation="horizontal">
 
+                <!-- Middle ellipsis keeps both the source/language prefix and any suffix visible. -->
                 <TextView
                     android:id="@+id/subtitle_name"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:ellipsize="end"
+                    android:ellipsize="middle"
                     android:maxLines="2"
                     android:text="@string/no_subtitles" />
 
@@ -110,39 +111,21 @@
 
                 <Button
                     android:id="@+id/pick_subtitle"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:maxLines="1"
-                    android:autoSizeTextType="uniform"
-                    android:autoSizeMinTextSize="12sp"
-                    android:autoSizeMaxTextSize="14sp"
+                    style="@style/SubtitleSourceButton"
                     android:text="@string/pick_file" />
 
                 <Button
                     android:id="@+id/search_subtitles"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
+                    style="@style/SubtitleSourceButton"
                     android:layout_marginStart="8dp"
                     android:enabled="false"
-                    android:maxLines="1"
-                    android:autoSizeTextType="uniform"
-                    android:autoSizeMinTextSize="12sp"
-                    android:autoSizeMaxTextSize="14sp"
                     android:text="@string/search_online" />
 
                 <Button
                     android:id="@+id/embedded_subtitles"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
+                    style="@style/SubtitleSourceButton"
                     android:layout_marginStart="8dp"
                     android:enabled="false"
-                    android:maxLines="1"
-                    android:autoSizeTextType="uniform"
-                    android:autoSizeMinTextSize="12sp"
-                    android:autoSizeMaxTextSize="14sp"
                     android:text="@string/embedded_subtitles" />
             </LinearLayout>
 

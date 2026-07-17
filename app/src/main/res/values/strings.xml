@@ -6,7 +6,7 @@
     <string name="streaming_notification_text">Local HTTP server is running</string>
 
     <string name="step_video">1 · Video</string>
-    <string name="step_subtitles">2 · Subtitles · optional</string>
+    <string name="step_subtitles">2 · Subtitles · optional · %1$s</string>
     <string name="step_chromecast">3 · Chromecast</string>
 
     <string name="no_video">No video selected</string>
@@ -17,8 +17,10 @@
     <string name="opensubtitles">OpenSubtitles</string>
     <string name="embedded_subtitles">In video</string>
     <string name="embedded_dialog_title">Subtitles in this video</string>
-    <string name="extracting_subtitles">Extracting %1$s…</string>
+    <string name="extracting_subtitles">🎞️ Extracting %1$s…</string>
+    <string name="extracting_subtitles_auto">🎞️ Auto · extracting %1$s…</string>
     <string name="cancel_extraction">Cancel extraction</string>
+    <string name="auto_suffix">· auto</string>
     <string name="clear_subtitle">Remove subtitle</string>
 
     <string name="not_connected">Not connected — tap the cast icon above</string>
@@ -38,6 +40,10 @@
     <string name="search">Search</string>
     <string name="search_label">Title</string>
     <string name="search_hint">e.g. Tuner 2025</string>
+    <string name="enter_title">Enter a title to search</string>
+    <string name="downloading">Downloading %1$s…</string>
+    <string name="download_failed">Download failed: %1$s</string>
+    <string name="search_failed">Search failed: %1$s</string>
     <string name="languages_label">Languages</string>
     <string name="languages_hint">e.g. en,hu</string>
     <string name="no_results">No results — refine the title above</string>

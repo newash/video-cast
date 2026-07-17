@@ -19,15 +19,22 @@ object EmbeddedSubtitles {
         /** MKV track number or MP4 track index. */
         val id: Long,
         val container: Container,
+        /** MKV codec ID ("S_TEXT/UTF8"); empty for MP4. */
+        val codecId: String,
+        /** Display format: "SRT", "ASS", "VTT", "TX3G". */
         val format: String,
+        /** Normalized language tag ("en", "pt-br"), or null when untagged. */
         val language: String?,
         val title: String?,
     ) {
-        /** Dialog row / applied-subtitle name, e.g. "[en] English SDH · SRT". */
+        /** Standalone name with language, e.g. "[en] English SDH · SRT" — dialog rows, progress. */
         val label: String
+            get() = listOfNotNull(language?.let { "[$it]" }, plainLabel).joinToString(" ")
+
+        /** Name without the language bracket — for contexts that show the language separately. */
+        val plainLabel: String
             get() = listOfNotNull(
-                language?.let { "[$it]" },
-                title ?: "Track $id",
+                title ?: LanguageTag.displayName(language) ?: "Track $id",
                 "· $format",
             ).joinToString(" ")
     }
@@ -42,10 +49,24 @@ object EmbeddedSubtitles {
         stream.reset()
         when {
             MkvSubtitles.isMkv(header) -> MkvSubtitles.listTracks(stream).map { track ->
-                Track(track.number, Container.MKV, track.format, track.language, track.title)
+                Track(
+                    id = track.number,
+                    container = Container.MKV,
+                    codecId = track.codecId,
+                    format = track.format,
+                    language = LanguageTag.normalize(track.language),
+                    title = track.title,
+                )
             }
             Mp4Subtitles.isMp4(header) -> Mp4Subtitles.listTracks(context, uri).map { track ->
-                Track(track.index.toLong(), Container.MP4, "TX3G", track.language, title = null)
+                Track(
+                    id = track.index.toLong(),
+                    container = Container.MP4,
+                    codecId = "",
+                    format = "TX3G",
+                    language = LanguageTag.normalize(track.language),
+                    title = null,
+                )
             }
             else -> emptyList()
         }
@@ -68,22 +89,12 @@ object EmbeddedSubtitles {
             // (both local SAF files and provider proxy descriptors are seekable).
             Container.MKV -> context.contentResolver.seekableOrStream(uri) { stream ->
                 onOpen(stream)
-                MkvSubtitles.extract(
-                    stream,
-                    MkvSubtitles.Track(track.id, mkvCodecId(track.format), null, null),
-                    onProgress,
-                )
+                MkvSubtitles.extract(stream, track.id, track.codecId, onProgress)
             }
             Container.MP4 -> Mp4Subtitles.extract(context, uri, track.id.toInt())
         }
         if (cues.isEmpty()) throw IOException("no cues in track")
         return SubtitleConverter.cuesToVtt(cues)
-    }
-
-    private fun mkvCodecId(format: String): String = when (format) {
-        "ASS" -> MkvSubtitles.CODEC_ASS
-        "VTT" -> MkvSubtitles.CODEC_VTT
-        else -> MkvSubtitles.CODEC_SRT
     }
 
     private fun InputStream.readAtMostBytes(n: Int): ByteArray {

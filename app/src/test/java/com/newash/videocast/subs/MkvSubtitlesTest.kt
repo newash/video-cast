@@ -73,7 +73,7 @@ class MkvSubtitlesTest {
         trackEntry(3, type = 0x11, codec = "S_TEXT/ASS", lang = "eng"),
     )
 
-    private val srtTrack = MkvSubtitles.Track(2, "S_TEXT/UTF8", "hun", "Magyar")
+    
 
     // ----------------------------------------------------------------- tests
 
@@ -103,7 +103,7 @@ class MkvSubtitlesTest {
                 blockGroup(2, 0, durationMs = 2000, text = "World"),
             ),
         )
-        val cues = MkvSubtitles.extract(ByteArrayInputStream(data), srtTrack)
+        val cues = MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8")
         assertEquals(
             listOf(
                 SubtitleConverter.Cue(10_500, 12_000, "Hello"),
@@ -124,20 +124,19 @@ class MkvSubtitlesTest {
                 simpleBlock(2, 2100, "Second"),
             ),
         )
-        val cues = MkvSubtitles.extract(ByteArrayInputStream(data), srtTrack)
+        val cues = MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8")
         assertEquals(2100L, cues[0].endMs) // next cue start
         assertEquals(10_100L, cues[1].endMs) // 8 s fallback cap
     }
 
     @Test
     fun `ass payload is stripped to plain text`() {
-        val assTrack = MkvSubtitles.Track(3, "S_TEXT/ASS", "eng", null)
         val payload = """12,0,Default,,0,0,0,,{\i1}Hello{\i0}\Nthere, world"""
         val data = mkv(
             header, tracks,
             element(0x1F43B675, uint(0xE7, 0), blockGroup(3, 0, durationMs = 1000, text = payload)),
         )
-        val cues = MkvSubtitles.extract(ByteArrayInputStream(data), assTrack)
+        val cues = MkvSubtitles.extract(ByteArrayInputStream(data), 3, "S_TEXT/ASS")
         assertEquals("Hello\nthere, world", cues.single().text)
     }
 
@@ -153,7 +152,7 @@ class MkvSubtitlesTest {
                 simpleBlock(2, 500, "kept"),
             ),
         )
-        val cues = MkvSubtitles.extract(ByteArrayInputStream(data), srtTrack)
+        val cues = MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8")
         assertEquals(listOf("kept"), cues.map { it.text })
     }
 
@@ -166,7 +165,7 @@ class MkvSubtitlesTest {
         val segment = idBytes(0x18538067) + byteArrayOf(0xFF.toByte()) +
             header + tracks + unknownSizeCluster + nextCluster
         val data = element(0x1A45DFA3, ByteArray(0)) + segment
-        val cues = MkvSubtitles.extract(ByteArrayInputStream(data), srtTrack)
+        val cues = MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8")
         assertEquals(listOf("one", "two"), cues.map { it.text })
         assertEquals(5000L, cues[1].startMs)
     }
@@ -201,7 +200,7 @@ class MkvSubtitlesTest {
                 blockGroup(2, 5000, durationMs = 1000, text = "lost to truncation"),
             ),
         )
-        val cues = MkvSubtitles.extract(ByteArrayInputStream(data.copyOf(data.size - 6)), srtTrack)
+        val cues = MkvSubtitles.extract(ByteArrayInputStream(data.copyOf(data.size - 6)), 2, "S_TEXT/UTF8")
         assertEquals(listOf("kept"), cues.map { it.text })
     }
 
@@ -231,7 +230,7 @@ class MkvSubtitlesTest {
         )
 
     private fun File.extractSrt(): List<SubtitleConverter.Cue> =
-        FileInputStream(this).use { MkvSubtitles.extract(it, srtTrack) }
+        FileInputStream(this).use { MkvSubtitles.extract(it, 2, "S_TEXT/UTF8") }
 
     private fun tempMkv(bytes: ByteArray): File =
         File.createTempFile("mkvtest", ".mkv").apply { writeBytes(bytes); deleteOnExit() }

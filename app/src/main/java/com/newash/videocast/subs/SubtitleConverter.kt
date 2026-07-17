@@ -5,6 +5,7 @@ import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
+import java.util.Locale
 
 /**
  * Converts SRT and ASS/SSA subtitles to WebVTT — the only sidecar text format
@@ -80,15 +81,10 @@ object SubtitleConverter {
         val fields = events.firstNotNullOfOrNull { it.sectionValue("Format:") }
             ?.split(',')?.map { field -> field.trim().lowercase() }
             ?: ASS_DEFAULT_FIELDS
-        return events
-            .mapNotNull { it.sectionValue("Dialogue:")?.toAssCue(fields) }
-            .sortedBy(AssCue::startMs)
-            .joinToString(separator = "\n\n", prefix = "WEBVTT\n\n", postfix = "\n") { cue ->
-                "${cue.startMs.toVttTime()} --> ${cue.endMs.toVttTime()}\n${cue.text}"
-            }
+        return cuesToVtt(events.mapNotNull { it.sectionValue("Dialogue:")?.toCue(fields) })
     }
 
-    /** A single subtitle cue with absolute times — the unit embedded-track extraction produces. */
+    /** A single subtitle cue with absolute times — the unit every conversion produces. */
     data class Cue(val startMs: Long, val endMs: Long, val text: String)
 
     fun cuesToVtt(cues: List<Cue>): String = cues
@@ -105,17 +101,15 @@ object SubtitleConverter {
     fun assEventToText(payload: String): String =
         payload.split(",", limit = 9).getOrNull(8)?.cleanAssText().orEmpty()
 
-    private data class AssCue(val startMs: Long, val endMs: Long, val text: String)
-
-    private fun String.toAssCue(fields: List<String>): AssCue? {
+    private fun String.toCue(fields: List<String>): Cue? {
         val values = split(",", limit = fields.size).map(String::trim)
         if (values.size < fields.size) return null
         fun field(name: String): String? = fields.indexOf(name).takeIf { it >= 0 }?.let(values::get)
-        return AssCue(
+        return Cue(
             startMs = field("start")?.parseAssTime() ?: return null,
             endMs = field("end")?.parseAssTime() ?: return null,
             text = field("text")?.cleanAssText() ?: return null,
-        ).takeIf { it.text.isNotBlank() }
+        )
     }
 
     /** "Key: value" line → value, or null when the line is not that key. */
@@ -146,8 +140,10 @@ object SubtitleConverter {
     private fun srtTime(h: String, m: String, s: String, ms: String): String =
         (hmsToMs(h, m, s) + ms.padEnd(3, '0').toLong()).toVttTime()
 
+    // Locale.ROOT: the default locale localizes %d digits (Arabic/Persian/Bengali
+    // numerals), which would render every timestamp unparseable to the receiver.
     private fun Long.toVttTime(): String =
-        "%02d:%02d:%02d.%03d".format(this / 3_600_000, this / 60_000 % 60, this / 1000 % 60, this % 1000)
+        "%02d:%02d:%02d.%03d".format(Locale.ROOT, this / 3_600_000, this / 60_000 % 60, this / 1000 % 60, this % 1000)
 
     // 00:01:02,345 --> 00:01:04,567  (SRT allows . or , and 1-3 ms digits).
     // Horizontal-only whitespace keeps the match line-scoped on the full text.

@@ -59,22 +59,23 @@ object MkvSubtitles {
                 else -> source.skipElement(header.id, header.size)
             }
         }
-        return tracks.filter { it.codecId.startsWith("S_TEXT/") }
+        return tracks
     }
 
-    /** All cues of [track], in play order: via the Cues index when usable, else a full scan. */
+    /** All cues of the track, in play order: via the Cues index when usable, else a full scan. */
     fun extract(
         input: InputStream,
-        track: Track,
+        trackNumber: Long,
+        codecId: String,
         onProgress: (percent: Int) -> Unit = {},
     ): List<SubtitleConverter.Cue> {
         val source = Source(input)
         source.enterSegment()
         val segStart = source.position
-        val head = source.readHead(track.number)
-        val blocks = source.readIndexedBlocks(segStart, head, track.number, onProgress)
-            ?: source.scanClusters(head, track.number, onProgress)
-        return blocks.toCues(head.scaleNs, track.codecId)
+        val head = source.readHead(trackNumber)
+        val blocks = source.readIndexedBlocks(segStart, head, trackNumber, onProgress)
+            ?: source.scanClusters(head, trackNumber, onProgress)
+        return blocks.toCues(head.scaleNs, codecId)
     }
 
     // ---------------------------------------------------------------- cues
@@ -103,7 +104,7 @@ object MkvSubtitles {
         while (true) {
             val header = nextHeader() ?: return head
             when (header.id) {
-                ID_SEEK_HEAD -> readSeekHead(header.size)[ID_CUES]?.let {
+                ID_SEEK_HEAD -> readSeekHead(header.size)?.let {
                     if (head.cuesPosition == null) head.cuesPosition = it
                 }
                 ID_INFO -> forEachChild(header.size) { id, size ->
@@ -120,9 +121,9 @@ object MkvSubtitles {
         }
     }
 
-    /** SeekHead → map of top-level element ID to segment-relative position. */
-    private fun Source.readSeekHead(size: Long): Map<Long, Long> {
-        val positions = mutableMapOf<Long, Long>()
+    /** SeekHead → segment-relative position of the Cues element, if listed. */
+    private fun Source.readSeekHead(size: Long): Long? {
+        var cues: Long? = null
         forEachChild(size) { id, childSize ->
             if (id == ID_SEEK) {
                 var target = -1L
@@ -135,12 +136,12 @@ object MkvSubtitles {
                         else -> skipElement(seekId, seekSize)
                     }
                 }
-                if (target > 0 && pos >= 0) positions.putIfAbsent(target, pos)
+                if (target == ID_CUES && pos >= 0 && cues == null) cues = pos
             } else {
                 skipElement(id, childSize)
             }
         }
-        return positions
+        return cues
     }
 
     private fun Source.readCues(size: Long, trackNumber: Long): List<CueEntry> {
@@ -190,7 +191,7 @@ object MkvSubtitles {
         segStart: Long,
         head: Head,
         trackNumber: Long,
-        onProgress: (Int) -> Unit = {},
+        onProgress: (Int) -> Unit,
     ): List<RawBlock>? {
         if (!seekable) return null
         val entries = head.cues ?: head.cuesPosition?.let { pos ->
@@ -231,16 +232,19 @@ object MkvSubtitles {
                 val rel = entry.relPos ?: return null // mixed index: bail to the full scan
                 advanceTo(clusterDataStart + rel)
                 val header = nextHeader() ?: return null
-                val (block, groupDuration) = when (header.id) {
-                    ID_SIMPLE_BLOCK, ID_BLOCK -> readBlock(header.size, trackNumber) to null
-                    ID_BLOCK_GROUP -> readGroupBlock(header.size, trackNumber) ?: (null to null)
-                    else -> return null // index points at garbage: don't trust any of it
-                }
-                val payload = block?.second ?: return null // wrong track at indexed position
-                blocks += RawBlock(entry.timeTicks, groupDuration ?: entry.durationTicks, payload)
+                val (payload, blockDuration) = when (header.id) {
+                    ID_SIMPLE_BLOCK, ID_BLOCK -> readBlock(header.size, trackNumber)?.let { it.second to null }
+                    ID_BLOCK_GROUP -> readGroupBlock(header.size, trackNumber)?.let { it.second to it.third }
+                    else -> null // index points at garbage: don't trust any of it
+                } ?: return null // no (or wrong-track) block at the indexed position: full scan instead
+                blocks += RawBlock(entry.timeTicks, blockDuration ?: entry.durationTicks, payload)
             }
         } catch (_: EOFException) {
             // Truncated file: keep what we got instead of failing the whole track.
+        } catch (e: InterruptedIOException) {
+            throw e // cancellation — must not degrade into starting a full scan
+        } catch (_: IOException) {
+            return null // index pointed at garbage: fall back to the full scan
         }
         return blocks.takeIf { it.isNotEmpty() }
     }
@@ -253,7 +257,7 @@ object MkvSubtitles {
     private fun Source.scanClusters(
         head: Head,
         trackNumber: Long,
-        onProgress: (Int) -> Unit = {},
+        onProgress: (Int) -> Unit,
     ): List<RawBlock> {
         val blocks = mutableListOf<RawBlock>()
         if (head.firstClusterAt < 0) return blocks
@@ -320,7 +324,7 @@ object MkvSubtitles {
             }
         }
         return Track(number, codec, (bcp47 ?: language)?.takeIf { it.isNotBlank() && it != "und" }, title)
-            .takeIf { type == TRACK_TYPE_SUBTITLE && number > 0 }
+            .takeIf { type == TRACK_TYPE_SUBTITLE && number > 0 && codec.startsWith("S_TEXT/") }
     }
 
     private fun Source.readCluster(size: Long, trackNumber: Long, out: MutableList<RawBlock>) {
@@ -331,30 +335,26 @@ object MkvSubtitles {
                 ID_SIMPLE_BLOCK -> readBlock(childSize, trackNumber)?.let { (rel, payload) ->
                     out += RawBlock(clusterTs + rel, duration = null, payload = payload)
                 }
-                ID_BLOCK_GROUP -> readGroupBlock(childSize, trackNumber)?.let { (block, duration) ->
-                    block?.let { (rel, payload) -> out += RawBlock(clusterTs + rel, duration, payload) }
+                ID_BLOCK_GROUP -> readGroupBlock(childSize, trackNumber)?.let { (rel, payload, duration) ->
+                    out += RawBlock(clusterTs + rel, duration, payload)
                 }
                 else -> skipElement(id, childSize)
             }
         }
     }
 
-    /** BlockGroup → (Block of [trackNumber] or null, BlockDuration or null); null if no Block at all. */
-    private fun Source.readGroupBlock(size: Long, trackNumber: Long): Pair<Pair<Long, String>?, Long?>? {
+    /** BlockGroup → (relative timestamp, text, BlockDuration or null) of [trackNumber]'s Block, else null. */
+    private fun Source.readGroupBlock(size: Long, trackNumber: Long): Triple<Long, String, Long?>? {
         var block: Pair<Long, String>? = null
         var duration: Long? = null
-        var sawBlock = false
         forEachChild(size) { id, childSize ->
             when (id) {
-                ID_BLOCK -> {
-                    sawBlock = true
-                    block = readBlock(childSize, trackNumber)
-                }
+                ID_BLOCK -> block = readBlock(childSize, trackNumber)
                 ID_BLOCK_DURATION -> duration = readUInt(childSize)
                 else -> skipElement(id, childSize)
             }
         }
-        return if (sawBlock) block to duration else null
+        return block?.let { (relative, text) -> Triple(relative, text, duration) }
     }
 
     /** Block/SimpleBlock payload for [trackNumber] → (relative timestamp, text), else skipped. */
@@ -511,6 +511,8 @@ object MkvSubtitles {
         fun readByte(): Int = readByteOrEof().also { if (it < 0) throw EOFException() }
 
         fun readBytes(n: Int): ByteArray {
+            // Corrupt element sizes must fail as IOException, not NegativeArraySize/OOM Errors.
+            if (n < 0 || n > MAX_ELEMENT_BYTES) throw IOException("implausible element size: $n")
             val bytes = ByteArray(n)
             var done = 0
             val started = if (n >= TIMING_MIN_BYTES) System.nanoTime() else 0L
@@ -574,11 +576,12 @@ object MkvSubtitles {
     private const val MAX_SEEK_THRESHOLD = 64L * 1024 * 1024
     private const val TIMING_MIN_BYTES = 4 * 1024
     private const val DEFAULT_BYTES_PER_NANO = 0.05 // ~50 MB/s when unmeasured
+    private const val MAX_ELEMENT_BYTES = 8 * 1024 * 1024 // generous for any text payload
 
-    const val CODEC_SRT = "S_TEXT/UTF8"
-    const val CODEC_ASS = "S_TEXT/ASS"
-    const val CODEC_SSA = "S_TEXT/SSA"
-    const val CODEC_VTT = "S_TEXT/WEBVTT"
+    private const val CODEC_SRT = "S_TEXT/UTF8"
+    private const val CODEC_ASS = "S_TEXT/ASS"
+    private const val CODEC_SSA = "S_TEXT/SSA"
+    private const val CODEC_VTT = "S_TEXT/WEBVTT"
 
     private val EBML_MAGIC = intArrayOf(0x1A, 0x45, 0xDF, 0xA3)
 

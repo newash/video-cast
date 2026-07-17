@@ -1,7 +1,9 @@
 package com.newash.videocast.subs
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SiblingSubtitlesTest {
@@ -67,5 +69,21 @@ class SiblingSubtitlesTest {
             "House.of.the.Dragon.S01E01.720p.x265.EN.SRT",
             best("House.of.the.Dragon.S01E01.720p.x265.EN.SRT"),
         )
+    }
+
+    @Test
+    fun `parent document ids follow saf path conventions`() {
+        assertEquals("primary:Movies", SiblingSubtitles.parentDocumentId("primary:Movies/a.mkv"))
+        assertEquals("primary:", SiblingSubtitles.parentDocumentId("primary:a.mkv")) // storage root
+        assertEquals("msf:", SiblingSubtitles.parentDocumentId("msf:123")) // non-path id: query will just fail
+        assertEquals(null, SiblingSubtitles.parentDocumentId("noseparator"))
+    }
+
+    @Test
+    fun `tree membership requires a path boundary`() {
+        assertTrue(SiblingSubtitles.isUnderTree("primary:Movies/a.mkv", "primary:Movies"))
+        assertFalse(SiblingSubtitles.isUnderTree("primary:MoviesHD/a.mkv", "primary:Movies"))
+        assertTrue(SiblingSubtitles.isUnderTree("primary:a.mkv", "primary:")) // tree at storage root
+        assertTrue(SiblingSubtitles.isUnderTree("nas:Films/x.mkv", "nas:"))
     }
 }

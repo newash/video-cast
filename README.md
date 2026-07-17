@@ -69,7 +69,7 @@ with a clear message (and, on OpenSubtitles' side, HTTP 403
 ## Testing
 
 ```
-./gradlew test          # subtitle conversion + JLHTTP range/CORS contract tests
+./gradlew test          # subtitle pipeline + JLHTTP range/CORS contract tests
 ```
 
 On-device verification of the server (milestone M2 in ARCHITECTURE.md):

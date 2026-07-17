@@ -4,6 +4,17 @@
         <item name="android:textAllCaps">false</item>
     </style>
 
+    <!-- Equal thirds; the autosize floor guarantees labels never wrap vertically. -->
+    <style name="SubtitleSourceButton">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:maxLines">1</item>
+        <item name="android:autoSizeTextType">uniform</item>
+        <item name="android:autoSizeMinTextSize">12sp</item>
+        <item name="android:autoSizeMaxTextSize">14sp</item>
+    </style>
+
 
     <!-- 16sp + weight (not size) marks section labels, per M3 type roles. -->
     <style name="SectionHeader">

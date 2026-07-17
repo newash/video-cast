@@ -111,9 +111,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.stop).onClick(vm::stopCasting)
         searchSubtitles.onClick(vm::openSearch)
         embeddedSubtitles.onClick(::showEmbeddedTracksDialog)
-        // ✕ doubles as cancel while an embedded track is being extracted.
+        // ✕ doubles as cancel while extracting; clearing also dismisses a subtitle error.
         clearSubtitle.onClick {
-            if (vm.state.value.extracting != null) vm.cancelExtraction() else vm.clearSubtitle()
+            if (vm.state.value.extraction != null) vm.cancelExtraction() else vm.clearSubtitle()
         }
         playOnTvButton.onClick(vm::startCasting)
         playPause.onClick(vm::togglePlayPause)
@@ -127,6 +127,7 @@ class MainActivity : AppCompatActivity() {
                 else -> {}
             }
         }
+
 
         seek.onSeek(
             onPreview = { fraction ->
@@ -171,23 +172,29 @@ class MainActivity : AppCompatActivity() {
         videoName.text = video?.let { "${it.name} (${it.sizeBytes.toHumanSize()})" }
             ?: getString(R.string.no_video)
         videoName.setTextColor(if (video == null) secondaryTextColors else primaryTextColors)
-        stepSubtitles.text = getString(R.string.step_subtitles).withCheck(subtitle != null)
+        stepSubtitles.text = getString(R.string.step_subtitles, languages).withCheck(subtitle != null)
         subtitleName.text = when {
-            extracting != null -> getString(
-                R.string.extracting_subtitles,
-                extractingPercent?.let { "$extracting · $it%" } ?: extracting,
+            extraction != null -> getString(
+                if (extraction.auto) R.string.extracting_subtitles_auto else R.string.extracting_subtitles,
+                extraction.percent?.let { "${extraction.label} · $it%" } ?: extraction.label,
             )
-            else -> subtitle?.name ?: getString(R.string.no_subtitles)
+            subtitleError != null -> subtitleError
+            subtitle != null -> subtitle.displayLine()
+            else -> getString(R.string.no_subtitles)
         }
         subtitleName.setTextColor(
-            if (subtitle == null && extracting == null) secondaryTextColors else primaryTextColors
+            when {
+                subtitleError != null && extraction == null -> ColorStateList.valueOf(errorColor)
+                subtitle == null && extraction == null -> secondaryTextColors
+                else -> primaryTextColors
+            }
         )
-        extractProgress.isVisible = extracting != null
-        clearSubtitle.isVisible = subtitle != null || extracting != null
+        extractProgress.isVisible = extraction != null
+        clearSubtitle.isVisible = subtitle != null || extraction != null || subtitleError != null
         clearSubtitle.contentDescription =
-            getString(if (extracting != null) R.string.cancel_extraction else R.string.clear_subtitle)
+            getString(if (extraction != null) R.string.cancel_extraction else R.string.clear_subtitle)
         searchSubtitles.isEnabled = video != null
-        embeddedSubtitles.isEnabled = embeddedTracks.isNotEmpty() && extracting == null
+        embeddedSubtitles.isEnabled = embeddedTracks.isNotEmpty() && extraction == null
         stepChromecast.text = getString(R.string.step_chromecast).withCheck(cast.connected)
         deviceStatus.text = when {
             cast.connected -> cast.deviceName ?: getString(R.string.connecting)
@@ -338,7 +345,7 @@ private class SearchDialog(
         message.showMessage(search.message, search.messageIsError, errorColor, messageDefaultColors)
         adapter.run {
             clear()
-            addAll(results.map { "[${it.language}] ⇩${it.downloads}  ${it.name}" })
+            addAll(results.map { "[${it.language.lowercase()}] ⇩${it.downloads}  ${it.name}" })
         }
     }
 
@@ -370,6 +377,14 @@ private fun TextView.showMessage(text: String?, error: Boolean, errorColor: Int,
 }
 
 private fun String.withCheck(done: Boolean): String = if (done) "✓ $this" else this
+
+/** One-line subtitle description: source marker, language, name, auto marker. */
+private fun SubtitleTrack.displayLine(): String = listOfNotNull(
+    source.marker,
+    language?.let { "[${it.uppercase(Locale.US)}]" },
+    name,
+    "· auto".takeIf { auto },
+).joinToString(" ")
 
 private fun timeLine(positionMs: Long, durationMs: Long): String =
     "${positionMs.toTimeString(durationMs)} / ${durationMs.toTimeString()}"
