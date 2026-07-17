@@ -1,25 +1,36 @@
-# VideoCast — Architecture & Build Plan
+# VideoCast — Architecture
 
-A minimal personal Android app: cast local video files to Chromecast with
-subtitle support. Replaces Web Video Caster for one specific workflow.
+A minimal personal Android app: cast local and NAS video files to Chromecast
+with subtitle support. Replaces Web Video Caster for one specific workflow.
+(NAS access is deliberately not the app's concern: an FTPS documents
+provider — RSAF — makes remote files look like ordinary SAF documents; the
+README carries the working recipe.)
 
 ## The core problem shape
 
-Chromecast (default media receiver) cannot read files off the phone. It can
-only fetch media over HTTP from a URL reachable on the LAN. So the app is
-really three cooperating pieces:
+Chromecast (default media receiver) cannot read files off the phone. It only
+fetches media over HTTP from a URL reachable on the LAN. So the app is three
+cooperating pieces:
 
-1. **An HTTP server on the phone** that serves the picked video file (with
-   `Range`/206 support, or seeking breaks) and a subtitle track (with CORS
+1. **An HTTP server on the phone** that serves the picked video (with
+   `Range`/206 support, or seeking breaks) and one subtitle track (with CORS
    headers, or the receiver silently drops it).
 2. **A Cast sender** that tells the default receiver to load
    `http://<phone-ip>:<port>/video` with a sidecar text track.
-3. **A subtitle pipeline** that turns whatever we have (local SRT/ASS, or an
-   SRT downloaded from OpenSubtitles) into WebVTT, the only sidecar format
-   the default receiver reliably renders.
+3. **A subtitle pipeline** that turns whatever source is at hand — a sibling
+   file, an OpenSubtitles download, a track embedded in the video — into
+   WebVTT, the only sidecar format the default receiver reliably renders.
+
+Two receiver constraints shape most of the interesting design below:
+
+- It never demuxes subtitles from progressive streams — embedded tracks must
+  be extracted on the phone and served as a sidecar like any other source.
+- A loaded item's track list is immutable and the sidecar is fetched once —
+  changing subtitles mid-play means reloading the media at the current
+  position.
 
 Everything else (UI, foreground service, notification) exists to keep those
-three alive and controllable.
+pieces alive and controllable.
 
 ## Component overview
 
@@ -36,11 +47,12 @@ three alive and controllable.
 │        GET /video      ◄─────────────────┼───────────────────────┼──◄ Chromecast fetches
 │        GET /subs.vtt   ◄─────────────────┘                       │    Range + CORS
 │                                                                  │
-│  Subtitle pipeline                                               │
+│  Subtitle pipeline (all sources → one acquisition path)          │
 │   ├─ SubtitleConverter: SRT/ASS → WebVTT (cues → VTT rendering)  │
 │   ├─ OpenSubtitlesClient (api.opensubtitles.com, title search)   │
 │   ├─ EmbeddedSubtitles: MKV (own EBML walker) + MP4 tracks       │
-│   └─ SiblingSubtitles: same-folder files via a SAF tree grant    │
+│   ├─ SiblingSubtitles: same-folder files via a SAF tree grant    │
+│   └─ LanguageTag: ISO 639 normalization every tag converges on   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -73,212 +85,177 @@ com.newash.videocast
 |---|---|---|
 | Language / style | Kotlin, functional-leaning: single immutable `UiState`, `val`s, extensions, pure functions (I/O and server internals stay pragmatically imperative) | Compact, testable; the UI is a dumb function of state. |
 | UI | Classic Views, one XML layout of system-default widgets; unicode glyphs (▶ ⏸ ⏪ ⏩ ✕) and vector drawables only | No Compose: saves megabytes of dependencies for a one-screen app. No styling for styling's sake, no bitmaps. Activity extends `AppCompatActivity` because the MediaRouter cast dialog requires an AppCompat theme. |
-| Cast | `play-services-cast-framework` (Cast v3 sender) + default media receiver (`CC1AD845`) | The framework handles discovery, session lifecycle, the media notification, and lock-screen controls for free — that's the "Cast notification" requirement done by configuration, not code. No custom receiver to host or register. |
-| HTTP server | **JLHTTP 3.2** | See justification below. |
+| Cast | `play-services-cast-framework` (Cast v3 sender) + default media receiver (`CC1AD845`) | The framework handles discovery, session lifecycle, the media notification, and lock-screen controls for free. No custom receiver to host or register. |
+| HTTP server | **JLHTTP 3.2** | See below. |
 | HTTP client / JSON | `HttpURLConnection` + Android's built-in `org.json` | Two REST endpoints don't justify OkHttp + a serialization library (~2 MB of APK). |
-| File access | Storage Access Framework (`ACTION_OPEN_DOCUMENT`) | No storage permissions needed on any Android version; content URIs work on scoped storage. |
+| File access | Storage Access Framework (`ACTION_OPEN_DOCUMENT`) | No storage permissions needed on any Android version; content URIs work on scoped storage — and NAS providers like RSAF plug in transparently. |
 | DI / architecture framework | None | Personal app, one screen. Manual wiring in the ViewModel. |
 
-Total third-party dependency surface: JLHTTP (~59 KB) and
-juniversalchardet (~250 KB, subtitle charset detection) plus the unavoidable
-androidx/Cast libraries.
+Total third-party dependency surface: JLHTTP (~59 KB) and juniversalchardet
+(~250 KB, subtitle charset detection) plus the unavoidable androidx/Cast
+libraries.
 
-### Why JLHTTP (the server justification)
+### Why JLHTTP
 
-Candidates considered:
+`net.freeutils:jlhttp` is a single-source-file, ~59 KB, zero-dependency,
+actively maintained, RFC 9110/9112-conformant embedded server on plain
+blocking sockets. Crucially, Range handling is *library* code: it parses
+(and RFC-correctly ignores invalid) `Range` headers and emits
+206/`Content-Range`/416 itself — the classic Chromecast-seek failure points
+are not ours to get wrong. HEAD and OPTIONS are handled per spec. Our code
+is two small context handlers; a JVM contract test (`JlhttpContractTest`)
+pins the range/CORS/HEAD semantics over real HTTP.
 
-- **JLHTTP** (`net.freeutils:jlhttp`, the choice) — a single-source-file,
-  ~59 KB, zero-dependency, actively maintained, RFC 9110/9112-conformant
-  embedded server on plain blocking sockets. Crucially for this app it has
-  *native* Range support: `Request.getRange()` parses (and RFC-correctly
-  ignores invalid) Range headers, and `Response.sendHeaders(..., range)`
-  emits 206/`Content-Range` — the classic Chromecast-seek failure points are
-  library code, not ours. HEAD and OPTIONS are handled per spec. Our code is
-  two small context handlers: CORS headers (the silent-subtitle-drop
-  failure point) plus a skip-by-reading stream wrapper, because some
-  `DocumentsProvider` streams refuse `skip()`, which JLHTTP's range slicing
-  relies on. A JVM contract test (`JlhttpContractTest`) pins the
-  range/CORS/HEAD semantics over real HTTP.
-- **NanoHTTPD** — the traditional choice (and this project's original one):
-  same weight class, but abandoned since 2016 with an unpatched CVE, no
-  built-in ranges (we hand-rolled them), and quirks like sending full bodies
-  for HEAD. Swapped out once JLHTTP proved a strict superset; done before
-  first on-device testing so the substrate is only verified once.
-- **microhttp** — modern and tiny, but buffers response bodies fully in
-  memory: disqualifying for multi-GB video.
-- **Ktor (CIO engine)** — modern and maintained, and `PartialContent` +
-  `CORS` plugins do the hard parts. But it pulls in a large dependency tree,
-  slows builds, grows the APK by megabytes, and its plugin abstractions get
-  in the way when debugging why a Chromecast rejected a specific byte-range
-  response. Overkill for two routes.
-- **Jetty / Netty / Undertow / AndroidServer / http4k** — heavier still,
-  unmaintained on Android, or not designed for embedding in an app process.
+Rejected: NanoHTTPD (the original choice — abandoned since 2016, unpatched
+CVE, hand-rolled ranges), microhttp (buffers whole bodies in memory —
+disqualifying for multi-GB video), Ktor (megabytes of dependency tree for
+two routes), Jetty/Netty/Undertow (not meant for embedding in an app
+process).
 
 ### Serving details that make or break casting
 
-- **Range/206** (`/video`): parsing, 206/`Content-Range`/416 emission, and
-  body slicing are all JLHTTP's (RFC 9110); we add `Accept-Ranges: bytes`
-  and open a fresh `ContentResolver` stream per request, wrapped so that
-  `skip()` falls back to reading — Chromecast issues a new range request on
-  every seek, and some `DocumentsProvider` streams refuse `skip()`, which
-  JLHTTP's slicing relies on.
-- **CORS** (`/subs.vtt` — and harmlessly on everything): the default
-  receiver's player fetches text tracks with CORS enforced;
-  `Access-Control-Allow-Origin: *` (plus `OPTIONS` preflight handling) or
-  subs silently fail. This is baked into every response the server sends.
+- **Range/206** (`/video`): JLHTTP does the protocol; we add
+  `Accept-Ranges: bytes` and open a fresh `ContentResolver` stream per
+  request, wrapped so `skip()` falls back to reading — Chromecast issues a
+  new range request on every seek, and some `DocumentsProvider` streams
+  refuse `skip()`, which JLHTTP's slicing relies on.
+- **CORS** (matters for `/subs.vtt`, applied to every response): the
+  receiver fetches text tracks with CORS enforced —
+  `Access-Control-Allow-Origin: *` plus OPTIONS preflight, or subs silently
+  fail.
+- **`/subs.vtt` never 404s**: with no subtitle set it serves an empty VTT.
+  A failed sidecar fetch can abort the receiver's whole media load, so the
+  route must always answer. `Cache-Control: no-store` keeps the receiver
+  from reusing a stale track across reloads.
 - **MIME**: video content type from `ContentResolver`/extension (fallback
-  `video/mp4`); subtitles served as `text/vtt; charset=utf-8`.
-- **Fixed port with fallback** (8394, then +1 up to a few tries), bound on
-  all interfaces; URL built from the Wi-Fi interface IPv4.
+  `video/mp4`); subtitles as `text/vtt; charset=utf-8`.
+- **Fixed port with fallback** (8394, +1 up to ten tries), bound on all
+  interfaces; URL built from the Wi-Fi interface IPv4.
 
-### Subtitle pipeline
+## The subtitle system
 
-- **Conversion**: the default receiver renders only WebVTT/TTML sidecars, so
-  everything converges on VTT, generated in memory and held by the server:
-  - SRT → VTT: `WEBVTT` header, `,` → `.` in timestamps, cue text passed
-    through (basic `<i>/<b>` tags survive fine).
-  - ASS → VTT: take the `[Events]` section, use its `Format:` line for field
-    order, strip `{\...}` override tags, `\N` → newline, `H:MM:SS.cc` → VTT
-    timestamps. Styling is discarded — text-only is the stated scope.
-  - Already-VTT files pass through.
-  - Encoding: BOM detection (UTF-8/16LE/16BE), then Mozilla's charset
-    detector (juniversalchardet, ~250 KB — the one hand-rolled piece a small
-    library genuinely beats: legacy SRTs come in windows-125x/ISO-8859-x/CJK
-    codepages), then strict UTF-8 with a windows-1252 fallback.
-- **OpenSubtitles** (`api.opensubtitles.com/api/v1`, baked-in API key, no
-  login): title-query search only (`GET /subtitles?query=…&languages=…`,
-  prefilled from the cleaned filename), ordered by download count. Download
-  is `POST /download {file_id}` → temp link → fetch SRT → same conversion
-  path. Anonymous quota (5/day) is fine for personal use.
-- **Embedded tracks**: the receiver never demuxes subtitles from progressive
-  files, so embedded text tracks are extracted on the phone and served as the
-  sidecar like any other source. MP4 (tx3g timed text) goes through the
-  platform `MediaExtractor` — sample-table driven, reads only the text
-  track's bytes. MKV needs `MkvSubtitles`, a hand-rolled EBML walker
-  (SRT/ASS/VTT codecs, track language + title), because Android's Matroska
-  extractor enumerates only video and audio tracks — subtitle tracks are
-  silently dropped, on every Android version. Extraction prefers the MKV
-  **Cues index** (SeekHead → Cues; the spec says every subtitle frame
-  SHOULD be indexed with CueRelativePosition, and mkvmerge/ffmpeg do so by
-  default): on a seekable descriptor it jumps straight to the indexed
-  subtitle blocks and reads well under 1% of the file. Files without a
-  usable index fall back to a full cluster scan whose skip-vs-read
-  threshold is calibrated from the measured seek cost — network-backed
-  providers (seconds per out-of-order read) stay near-sequential, local
-  files seek freely. Cheap header probe at pick time decides whether the
-  "In video" button lights up; extraction happens only when a track is
-  chosen, is cancellable (✕), and interrupt checks in the read loops make
-  cancellation actually stop the I/O. The last used subtitle language (one
-  value, shared with OpenSubtitles search) is the only persisted app
-  preference.
-- **Auto-select on pick** (strict order, first hit wins): (1) sibling file
-  tagged with the saved language — name-token match, 2- and 3-letter codes
-  (`.en.` / `.eng.`, extra tokens like `.forced.` allowed); (2) plain
-  undecorated sibling (`base.srt`); (3) embedded track in the saved
-  language. SAF grants are per-document, so rules 1–2 require a persisted
-  tree grant (`ACTION_OPEN_DOCUMENT_TREE`, offered once via the tappable
-  status line, then matched to picked videos by document-ID prefix);
-  rule 3 needs nothing. Sibling matching itself is a pure function
-  (`SiblingSubtitles.bestMatch`) with unit tests.
-- **Casting the track**: `MediaTrack(id=1, TYPE_TEXT, SUBTYPE_SUBTITLES,
-  contentId=http://…/subs.vtt?v=N, contentType=text/vtt)` attached to
-  `MediaInfo`; a ready track is activated via `setActiveTrackIds([1])` on
-  the load request — activating at load time is far more reliable than
-  toggling after.
-- **Casting barely waits for extraction, and subtitles cover from 0:00.**
-  The extraction starts at pick time, so by the time the user taps Play it
-  has typically covered the first many minutes of the file. Play then asks
-  the running extraction for a snapshot of the cues collected so far (the
-  walker's one pass emits it at the next block boundary; a ~4 s gate
-  bounds the wait for a lightning-fast tap) and loads with that snapshot
-  as the active track — subtitles from 0:00, near-instant start. When the
-  extraction completes mid-playback, the app reloads at the current
-  position with a bumped `?v=` track URL (`Cache-Control: no-store`) —
-  one short hiccup, then the complete cue set. All three sources —
-  embedded, file, OpenSubtitles — run through one acquisition pipeline in
-  the ViewModel (job supersession, auto-yields-to-explicit policy,
-  progress/error surfaces, stale-apply guard, language memory, apply +
-  re-cast); per-source code is just the fetch. The extraction's sequential read overlaps rclone's VFS cache
-  of the cast stream, so network cost stays ~1× the file. Evaluated and
-  rejected: a tee inside the server (cues trail the playhead; the cache
-  already deduplicates bytes), growing/streamed sidecars (the receiver
-  fetches once), and multi-track activation ratchets (rest on undocumented
-  receiver fetch timing).
+### One acquisition pipeline, three sources
 
-### Surviving screen-off
+Every subtitle — sibling file, OpenSubtitles download, embedded track —
+flows through a single ViewModel pipeline (`acquireSubtitle`); a source
+contributes only its fetch step. The pipeline owns everything the sources
+share:
 
-`StreamingService` is a foreground service (`mediaPlayback` type) that owns
-the JLHTTP instance, holds a `WifiLock` (`FULL_HIGH_PERF`) and a partial
-wake lock while a session is active, and shows a minimal persistent
-notification. The Cast framework's own `MediaNotificationService` (enabled
-via `CastOptionsProvider`) provides the rich media notification with
-play/pause controls. The service starts when casting begins and stops —
-releasing both locks and the server — as soon as the Cast session terminally
-ends (`onSessionEnded`); transient suspensions (brief Wi-Fi drops) keep it
-alive so playback can recover.
+- **Supersession**: at most one acquisition runs; starting a new one cancels
+  the previous — except an *automatic* pick never cancels an *explicit* user
+  choice (the app's guess must not kill the user's action).
+- **Language memory**: explicit picks update the remembered languages
+  (the app's only persisted preference, shared by auto-select and the
+  OpenSubtitles search field); automatic picks don't.
+- **Stale-apply guard**: a result is dropped if the video changed while it
+  was being fetched.
+- **Progress and error surfaces**: one status line shows "reading … · N%"
+  during extraction and the error afterwards; auto and manual runs are
+  labeled differently.
+- **Apply + re-cast**: a subtitle arriving mid-play triggers the
+  reload-at-position described below — no matter which source it came from.
 
-Control from the TV remote needs no phone involvement: CEC commands go to
-the Chromecast and the default receiver handles play/pause/seek itself. The
-phone only sees the consequences (a seek arrives as a new Range request) and
-the app UI stays in sync by polling `RemoteMediaClient`.
+Nothing is written to disk: fetched and extracted subtitles live in memory
+(the served VTT is a string field on the server).
 
-## CI
+### Conversion — everything becomes VTT
+
+SRT → VTT is a header plus `,` → `.` timestamps; ASS → VTT parses the
+`[Events]` section by its `Format:` line, strips `{\...}` override tags,
+and discards styling (text-only is the stated scope); VTT passes through.
+All routes converge on one cue model (`Cue` → `cuesToVtt`), which sorts and
+drops empty cues. Encoding: BOM detection, then Mozilla's charset detector
+(juniversalchardet — the one job a small library genuinely beats
+hand-rolling: legacy SRTs come in windows-125x/ISO-8859-x/CJK codepages),
+then strict UTF-8 with a windows-1252 fallback.
+
+### Embedded tracks — the MKV walker
+
+MP4 (tx3g timed text) goes through the platform `MediaExtractor`:
+sample-table driven, reads only the text track's bytes. MKV needs
+`MkvSubtitles`, a hand-rolled EBML walker (SRT/ASS/VTT codecs, track
+language and title), because Android's Matroska extractor silently drops
+subtitle tracks on every Android version.
+
+Extraction prefers the MKV **Cues index** (SeekHead → Cues; mkvmerge and
+ffmpeg index every subtitle frame by default): on a seekable descriptor it
+jumps straight to the indexed subtitle blocks and reads well under 1% of
+the file. Files without a usable index fall back to a cluster scan whose
+skip-vs-read threshold is calibrated from the measured seek cost — network
+providers (seconds per out-of-order read) stay near-sequential, local files
+seek freely. A cheap header probe at pick time decides whether the
+"In video" button lights up; extraction is cancellable, with interrupt
+checks in the read loops so cancellation actually stops the I/O.
+
+### Auto-select on pick
+
+When a video is picked, the app tries, in strict order, first hit wins:
+(1) a sibling file tagged with a saved language (`.en.` / `.eng.`, extra
+tokens like `.forced.` allowed); (2) a plain undecorated sibling
+(`base.srt`); (3) an embedded track in a saved language. SAF grants are
+per-document, so rules 1–2 need a persisted tree grant
+(`ACTION_OPEN_DOCUMENT_TREE`, offered once via the tappable status line,
+then matched to picked videos by document-ID prefix); rule 3 needs nothing.
+Sibling matching is a pure function (`SiblingSubtitles.bestMatch`).
+
+### Casting barely waits, and subtitles cover from 0:00
+
+The naive orders are both wrong: extract-then-cast delays playback by the
+extraction (minutes on a cold NAS file), cast-then-extract loses the
+subtitles of the opening scene, because the receiver fetches the sidecar
+once and the track list is immutable after load. The resolution:
+
+- Extraction starts at pick time, so by Play it has typically covered many
+  minutes of the file.
+- Play asks the running extraction for a snapshot of the cues collected so
+  far (emitted at the next block boundary — usually milliseconds; a ~4 s
+  gate bounds the wait) and loads with that snapshot as the active track.
+  Near-instant start, subtitles from 0:00.
+- When the extraction completes mid-playback, the app reloads at the live
+  position with a bumped `?v=` track URL — one short hiccup, then the
+  complete cue set. The same reload path serves any subtitle picked or
+  downloaded mid-play.
+
+The extraction's sequential read overlaps the rclone VFS cache of the cast
+stream, so network cost stays ~1× the file. Evaluated and rejected: a tee
+inside the server (cues trail the playhead), growing/streamed sidecars (the
+receiver fetches once), and multi-track activation ratchets (rest on
+undocumented receiver fetch timing).
+
+### Attaching the track
+
+`MediaTrack(id=1, TYPE_TEXT, SUBTYPE_SUBTITLES, contentId=…/subs.vtt?v=N,
+contentType=text/vtt)` on the `MediaInfo`, activated via
+`setActiveTrackIds([1])` *on the load request* — activating at load time is
+reliable, toggling afterwards is not.
+
+## Surviving screen-off
+
+`StreamingService` is a foreground service (`mediaPlayback` type) that
+keeps the process — and with it `ServerHolder`'s JLHTTP instance — alive,
+holding a `WifiLock` (`FULL_HIGH_PERF`) and a partial wake lock. The Cast
+framework's own `MediaNotificationService` provides the rich media
+notification with transport controls; the service's own notification exists
+only to satisfy the foreground requirement. The service starts when casting
+begins and stops — releasing locks and server — when the Cast session
+terminally ends; transient suspensions (brief Wi-Fi drops) keep it alive so
+playback can recover.
+
+Control from the TV remote needs no phone involvement: CEC goes to the
+Chromecast and the receiver handles play/pause/seek itself. The phone only
+sees the consequences (a seek arrives as a new Range request) and the UI
+stays in sync by polling `RemoteMediaClient`.
+
+## CI & releases
 
 GitHub Actions (`.github/workflows/android.yml`): on every push, run the
 unit tests and build the debug APK. Master builds also publish the APK to
 the rolling `latest` prerelease — that's the install channel (workflow
-artifacts expire and require a login; see README). Versions derive from
-git (`versionCode` = commit count) and builds are signed with the
-committed debug keystore so updates install over each other.
+artifacts expire and require a login; see README). Versions derive from git
+(`versionCode` = commit count) and builds are signed with the committed
+debug keystore so updates install over each other.
 
-## Build plan — verifiable milestones
-
-Each milestone leaves the repo in a state where something concrete can be
-checked.
-
-**M1 — Skeleton that builds.**
-Gradle project, manifest, empty activity, all dependencies resolved; CI
-workflow in place.
-✔ Verify: the Android CI workflow is green and produces an APK artifact.
-
-**M2 — File picking + HTTP server with Range.**
-SAF video picker; `StreamingService` + `MediaServer` serving `/video`.
-✔ Verify: the `JlhttpContractTest` range/CORS/HEAD contract tests; then pick a file on the phone and,
-from a laptop on the same LAN:
-`curl -sI http://<phone>:8394/video` shows `Accept-Ranges: bytes`;
-`curl -s -H "Range: bytes=100-199" -o /dev/null -w "%{http_code} %{size_download}"`
-prints `206 100`; and `curl` with no range returns the full byte count.
-
-**M3 — Basic casting.**
-Cast button, session management, load `/video` on the default receiver,
-play/pause/±seek buttons and a position slider.
-✔ Verify: video plays on TV; seeking works (this proves M2's ranges under
-the real client); play/pause from the app works; Cast media notification
-appears; playback continues with the phone screen off (proves the
-foreground service + locks).
-
-**M4 — Local subtitles.**
-SAF subtitle picker, SRT→VTT and ASS→VTT conversion, `/subs.vtt` with CORS,
-track attached and active at load.
-✔ Verify: unit tests for the converters (timestamps, ASS tag stripping,
-windows-1252 fallback); on-TV: subs render for an SRT and an ASS file;
-`curl -sI http://<phone>:8394/subs.vtt` shows `Access-Control-Allow-Origin: *`
-and `Content-Type: text/vtt`.
-
-**M5 — OpenSubtitles.**
-Title-query search (prefilled from the filename), result list, anonymous
-download, feed into the M4 pipeline.
-✔ Verify: search a known movie title end-to-end and see the downloaded subs
-render on TV; error paths (bad key, quota, no results) show readable
-messages.
-
-**M6 — Polish.**
-Error surfacing (no Wi-Fi, port busy, no session), remember last language,
-app icon.
-✔ Verify: manual pass through each failure path shows a readable message
-instead of a crash.
-
-## Non-goals (unchanged from the brief)
+## Non-goals
 
 Web video detection, non-Chromecast receivers, queues/playlists,
 transcoding, image-based subtitles (PGS/VobSub), Play Store publishing,
