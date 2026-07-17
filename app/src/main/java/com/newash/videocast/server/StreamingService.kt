@@ -69,9 +69,11 @@ class StreamingService : Service() {
     }
 
     override fun onDestroy() {
+        // Locks only — the server is stopped by whoever sent the stop intent.
+        // Stopping it here would let a stop-then-play race kill the server the
+        // new cast just started.
         wifiLock.release()
         wakeLock.release()
-        ServerHolder.stop()
         super.onDestroy()
     }
 
@@ -81,7 +83,14 @@ class StreamingService : Service() {
         private const val NOTIFICATION_ID = 1
 
         fun start(context: Context) {
-            ContextCompat.startForegroundService(context, Intent(context, StreamingService::class.java))
+            try {
+                ContextCompat.startForegroundService(context, Intent(context, StreamingService::class.java))
+            } catch (_: IllegalStateException) {
+                // Background FGS restriction (API 31+), e.g. a re-cast finishing
+                // while the app is backgrounded with no service yet. The cast
+                // still works — the server just runs without the lock guarantees
+                // until the app is next foregrounded.
+            }
         }
 
         fun stop(context: Context) {

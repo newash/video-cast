@@ -82,16 +82,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private var searchDialog: SearchDialog? = null
+    /** The embedded-tracks or crash dialog — tracked so rotation doesn't leak its window. */
+    private var infoDialog: AlertDialog? = null
+    private var introOverlay: IntroductoryOverlay? = null
     private var introShown = false
     private val castStateListener = CastStateListener { state ->
         if (state != CastState.NO_DEVICES_AVAILABLE && !introShown) {
             introShown = true
-            IntroductoryOverlay.Builder(this, castIcon)
+            introOverlay = IntroductoryOverlay.Builder(this, castIcon)
                 .setTitleText(getString(R.string.intro_overlay))
                 .setOverlayColor(R.color.cast_intro_scrim)
                 .setSingleTime()
                 .build()
-                .show()
+                .also(IntroductoryOverlay::show)
         }
     }
 
@@ -144,8 +147,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         sharedCastContext?.removeCastStateListener(castStateListener)
+        searchDialog?.let { vm.saveSearchInputs(it.queryText, it.languagesText) }
         searchDialog?.dismissSilently()
         searchDialog = null
+        infoDialog?.setOnDismissListener(null) // silent: rotation is not a dismissal
+        infoDialog?.dismiss()
+        infoDialog = null
+        introOverlay?.remove()
+        introOverlay = null
         super.onDestroy()
     }
 
@@ -208,14 +217,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         controls.isVisible = cast.hasMedia
-        // The receiver keeps its media session across app restarts; with no video
-        // picked these controls steer a leftover stream whose server is gone —
-        // play/pause/stop still work (receiver-side), but seeking cannot.
-        controlsHint.isVisible = !hasVideo
-        seek.isEnabled = hasVideo
-        rewind.isEnabled = hasVideo
-        forward.isEnabled = hasVideo
-        nowPlaying.text = listOfNotNull(video?.name, cast.deviceName?.let { "→ $it" }).joinToString("  ")
+        // The receiver keeps its media session across app restarts; castVideo is
+        // null for such leftover streams, whose server is gone — play/pause/stop
+        // still work (receiver-side), but seeking cannot.
+        controlsHint.isVisible = castVideo == null
+        seek.isEnabled = castVideo != null
+        rewind.isEnabled = castVideo != null
+        forward.isEnabled = castVideo != null
+        nowPlaying.text =
+            listOfNotNull(castVideo?.name, cast.deviceName?.let { "→ $it" }).joinToString("  ")
         playPause.text = if (cast.playing) "❚❚" else "▶"
         if (!seek.isPressed) {
             seek.progress = if (cast.durationMs > 0) (cast.positionMs * 1000 / cast.durationMs).toInt() else 0
@@ -250,7 +260,7 @@ class MainActivity : AppCompatActivity() {
         val tracks = vm.state.value.embeddedTracks.ifEmpty { return }
         // One obvious track shouldn't cost a dialog round-trip.
         tracks.singleOrNull()?.let { return vm.pickEmbeddedTrack(it) }
-        AlertDialog.Builder(this)
+        infoDialog = AlertDialog.Builder(this)
             .setTitle(R.string.embedded_dialog_title)
             .setItems(tracks.map { it.label }.toTypedArray()) { _, index ->
                 tracks.getOrNull(index)?.let(vm::pickEmbeddedTrack)
@@ -260,7 +270,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showCrashDialog(stack: String) {
-        AlertDialog.Builder(this)
+        infoDialog = AlertDialog.Builder(this)
             .setTitle(R.string.crash_notice)
             .setMessage(stack.take(4000))
             .setPositiveButton(R.string.close, null)
@@ -298,6 +308,10 @@ private class SearchDialog(
     private val content = activity.layoutInflater.inflate(R.layout.dialog_search, null)
     private val query = content.findViewById<EditText>(R.id.query)
     private val languages = content.findViewById<EditText>(R.id.languages)
+
+    /** Live input contents — saved across rotation, which recreates the dialog. */
+    val queryText: String get() = query.text.toString()
+    val languagesText: String get() = languages.text.toString()
     private val searchButton = content.findViewById<Button>(R.id.search)
     private val progress = content.findViewById<ProgressBar>(R.id.progress)
     private val message = content.findViewById<TextView>(R.id.dialog_message)

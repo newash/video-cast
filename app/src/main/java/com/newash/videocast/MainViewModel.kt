@@ -75,8 +75,14 @@ data class UiState(
     val note: Note? = null,
     /** Full stack of the previous run's crash; shown as a tappable one-liner. */
     val crash: String? = null,
-    /** Cast pressed, receiver hasn't reported media yet. */
+    /** Cast pressed, receiver hasn't accepted the load yet. */
     val loading: Boolean = false,
+    /**
+     * The video this app run loaded on the receiver; null means any media there
+     * is a leftover stream from a previous run (controllable, but not seekable —
+     * its server is gone) and must never be re-cast over.
+     */
+    val castVideo: VideoFile? = null,
     /**
      * Subtitle name active on the receiver. Arrivals auto-re-cast, so the manual
      * re-cast affordance effectively surfaces only after clearing mid-cast.
@@ -107,10 +113,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val state: StateFlow<UiState> = _state
 
     // null when Play Services is unavailable — casting is then simply off.
-    // Session termination (ended, or failed start/resume) releases the server,
-    // wifi lock, and wake lock: no battery spent after the movie.
     private val castPlayer: CastPlayer? by lazy {
-        runCatching { CastPlayer(app) { StreamingService.stop(app) } }.getOrNull()
+        runCatching { CastPlayer(app, ::onSessionTerminated) }.getOrNull()
     }
 
     private val openSubtitles = OpenSubtitlesClient(BuildConfig.OPENSUBTITLES_API_KEY)
@@ -119,6 +123,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var probeJob: Job? = null
     private var acquireJob: Job? = null
     private var pickJob: Job? = null
+
+    /** Bumped per load request: only the newest load's verdict may act on shared state. */
+    private var loadVersion = 0
 
     /** The acquisition's open stream — closed from outside to abort a blocked read. */
     private val acquisitionStream = AtomicReference<AutoCloseable?>()
@@ -159,7 +166,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             while (isActive) {
                 if (_state.subscriptionCount.value > 0) {
                     runCatching(player::progress).onSuccess { p ->
-                        _state.update { it.copy(cast = p, loading = it.loading && !p.hasMedia) }
+                        // loading clears in onLoadResult — old media lingering through
+                        // a re-cast must not re-enable Play mid-load.
+                        _state.update { it.copy(cast = p) }
                     }
                 }
                 delay(500)
@@ -198,6 +207,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update {
                 it.copy(
                     video = video,
+                    subtitle = null, // the old video's cues must never be cast with this one
                     embeddedTracks = emptyList(),
                     subtitleFolderHint = null,
                     subtitleError = null,
@@ -326,10 +336,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             } finally {
-                acquisitionStream.set(null)
+                // A cancelled run's finally can lag past its successor's start (blocked
+                // IO): only the still-current run owns the stream slot and progress line.
+                if (acquireJob === coroutineContext[Job]) {
+                    acquisitionStream.set(null)
+                    _state.update { it.copy(extraction = null) }
+                }
                 if (snapshotHook === hook) snapshotHook = null
                 hook?.vtt?.complete("") // release any gate still waiting on this run
-                _state.update { it.copy(extraction = null) }
             }
         }.also { acquireJob = it }
     }
@@ -345,13 +359,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun pickEmbeddedTrack(track: EmbeddedSubtitles.Track, auto: Boolean = false) {
         val video = _state.value.video ?: return
-        val hook = SnapshotHook()
+        // Snapshots are inert for MP4 — a hook there would only stall the Play gate.
+        val hook = SnapshotHook().takeIf { track.container == EmbeddedSubtitles.Container.MKV }
         acquireSubtitle(
             auto = auto,
             progress = track.label,
             hook = hook,
             onError = { e ->
-                val partial = if (hook.vtt.isCompleted) " — the TV keeps the partial subtitles" else ""
+                val partial = if (hook?.vtt?.isCompleted == true) " — the TV keeps the partial subtitles" else ""
                 _state.update {
                     it.copy(subtitleError = "Extraction failed (${track.label}): ${e.message}$partial")
                 }
@@ -368,7 +383,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 ?: state
                         }
                     },
-                    snapshot = hook.snapshot,
+                    snapshot = hook?.snapshot,
                 )
             }
             SubtitleTrack(track.plainLabel, vtt, track.language, SubtitleSource.EMBEDDED, auto)
@@ -435,6 +450,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(search = null) }
     }
 
+    /** Keeps half-typed dialog inputs across rotation (state otherwise updates on submit). */
+    fun saveSearchInputs(query: String, languages: String) =
+        updateSearch { it.copy(query = query, languages = languages) }
+
     /** Updates search state only while the dialog is still open — a response must not resurrect it. */
     private fun updateSearch(transform: (SearchState) -> SearchState) =
         _state.update { it.copy(search = it.search?.let(transform)) }
@@ -483,26 +502,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _state.update { it.copy(loading = true, note = null) }
             reporting({ e -> onLoadResult(e.message ?: "unknown error") }) {
-                val (ip, server) = withContext(Dispatchers.IO) {
-                    (localIpv4() ?: error("No Wi-Fi/LAN address found")) to ServerHolder.ensureStarted(app)
-                }
                 val prefixVtt = _state.value
                     .takeIf { it.video?.uri == video.uri && it.subtitle == null && it.extraction != null }
                     ?.let { awaitPrefixVtt() }
-                // Re-read after the gate: the acquisition may just have finished,
-                // or a new pick may have replaced the video.
+                // The service starts before the server so it owns it through any
+                // bail; the server resolves after the gate, because a Stop during
+                // the gate kills whatever instance was running before it.
+                StreamingService.start(app)
+                val (ip, server) = withContext(Dispatchers.IO) {
+                    (localIpv4() ?: error("No Wi-Fi/LAN address found")) to ServerHolder.ensureStarted(app)
+                }
+                // Re-read after the last suspension: the acquisition may just have
+                // finished, or a new pick may have replaced the video.
                 val current = _state.value
                 if (current.video?.uri != video.uri) {
                     _state.update { it.copy(loading = false) }
+                    if (!current.cast.hasMedia) stopStreaming() // nothing needs the server
                     return@reporting
                 }
                 val subtitlePending = current.subtitle == null && current.extraction != null
-                StreamingService.start(app)
                 server.video = MediaServer.Video(video.uri, video.mime, video.sizeBytes)
                 // null → the subtitle route serves a valid empty VTT by itself.
                 server.subtitleVtt = current.subtitle?.vtt ?: prefixVtt
                 val base = "http://$ip:${server.port}"
                 vttVersion++
+                val version = ++loadVersion // a superseded load's verdict must not act
                 player.load(
                     videoUrl = base + MediaServer.VIDEO_PATH,
                     mime = video.mime,
@@ -511,9 +535,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         .takeIf { current.subtitle != null || subtitlePending || prefixVtt != null },
                     subtitleLanguage = current.subtitle?.language ?: rememberedLanguageTag,
                     startPositionMs = resumeAtMs,
-                    onResult = ::onLoadResult,
+                    onResult = { error ->
+                        if (version == loadVersion) onLoadResult(error, video, current.subtitle?.name)
+                    },
                 )
-                _state.update { it.copy(castSubtitle = current.subtitle?.name) }
             }
         }
     }
@@ -523,6 +548,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * with a fresh track URL — one short hiccup, then complete cues.
      */
     private fun recastWithSubtitle() {
+        // Only over our own, still-current video: a late subtitle for a newly
+        // picked video must not hijack what's playing on the TV.
+        val castUri = _state.value.castVideo?.uri ?: return
+        if (_state.value.video?.uri != castUri) return
         // Query the SDK directly: the polled state freezes while backgrounded.
         val progress = runCatching { castPlayer?.progress() }.getOrNull() ?: return
         if (progress.hasMedia) startCasting(resumeAtMs = progress.positionMs)
@@ -535,10 +564,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return withTimeoutOrNull(PREFIX_VTT_TIMEOUT_MS) { hook.vtt.await() }?.takeIf { it.isNotEmpty() }
     }
 
-    private fun onLoadResult(error: String?) {
-        if (error == null) return
+    /** The receiver's verdict on a load: record what's live on it, or clean up. */
+    private fun onLoadResult(error: String?, video: VideoFile? = null, subtitleName: String? = null) {
+        if (error == null) {
+            _state.update { it.copy(loading = false, castVideo = video, castSubtitle = subtitleName) }
+            // A subtitle that arrived during the load round-trip missed its
+            // auto-re-cast (castVideo wasn't recorded yet) — catch it up now.
+            val subtitle = _state.value.subtitle
+            if (subtitle != null && subtitle.name != subtitleName) recastWithSubtitle()
+            return
+        }
         // Clean up only when idle — a still-playing previous cast keeps its server.
-        if (!_state.value.cast.hasMedia) StreamingService.stop(app)
+        if (!_state.value.cast.hasMedia) stopStreaming()
         _state.update { it.copy(loading = false, note = Note("Cast failed: $error")) }
     }
 
@@ -565,7 +602,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopCasting() {
         castPlayer?.stop()
+        stopStreaming()
+    }
+
+    /**
+     * Session termination (ended, or failed start/resume) releases the server,
+     * wifi lock, and wake lock: no battery spent after the movie.
+     */
+    private fun onSessionTerminated() {
+        stopStreaming()
+        _state.update { it.copy(loading = false, castVideo = null, castSubtitle = null) }
+    }
+
+    /**
+     * The server stops here — with the intent — not in the service's onDestroy:
+     * a stop-then-play race must never let the dying service kill the server
+     * the new cast just started.
+     */
+    private fun stopStreaming() {
         StreamingService.stop(app)
+        ServerHolder.stop()
     }
 
     private companion object {
