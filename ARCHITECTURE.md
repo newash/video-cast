@@ -161,8 +161,17 @@ Candidates considered:
   "In video" button lights up; extraction happens only when a track is
   chosen, is cancellable (✕), and interrupt checks in the read loops make
   cancellation actually stop the I/O. The last used subtitle language (one
-  value, shared with OpenSubtitles search) is the only persisted
+  value, shared with OpenSubtitles search) is the only persisted app
   preference.
+- **Auto-select on pick** (strict order, first hit wins): (1) sibling file
+  tagged with the saved language — name-token match, 2- and 3-letter codes
+  (`.en.` / `.eng.`, extra tokens like `.forced.` allowed); (2) plain
+  undecorated sibling (`base.srt`); (3) embedded track in the saved
+  language. SAF grants are per-document, so rules 1–2 require a persisted
+  tree grant (`ACTION_OPEN_DOCUMENT_TREE`, offered once via the tappable
+  status line, then matched to picked videos by document-ID prefix);
+  rule 3 needs nothing. Sibling matching itself is a pure function
+  (`SiblingSubtitles.bestMatch`) with unit tests.
 - **Casting the track**: `MediaTrack(id=1, TYPE_TEXT, SUBTYPE_SUBTITLES,
   contentId=http://…/subs.vtt, contentType=text/vtt)` attached to
   `MediaInfo`, activated via `setActiveTrackIds([1])` on the load request —

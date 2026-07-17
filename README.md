@@ -18,6 +18,11 @@ milestone build plan.
   converted to WebVTT and served with CORS headers — the only way the
   default receiver renders sidecar text tracks. The last used subtitle
   language is remembered across all sources.
+- Auto-pick on video selection, in order: a sibling subtitle file tagged
+  with the remembered language (`Movie.en.srt`), a plain sibling
+  (`Movie.srt`), then an embedded track in that language. Sibling lookup
+  needs a one-time folder grant (the status line offers it); the embedded
+  rule works without any grant.
 - NAS streaming without any app changes: install
   [RSAF](https://github.com/chenxiaolong/RSAF) and the NAS appears in the
   system file picker; VideoCast streams straight from it. Working Synology

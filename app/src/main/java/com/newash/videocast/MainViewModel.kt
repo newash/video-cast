@@ -3,9 +3,11 @@ package com.newash.videocast
 import android.app.Application
 import android.content.ContentResolver
 import android.content.Context
+import android.content.Intent
 import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -15,6 +17,7 @@ import com.newash.videocast.server.ServerHolder
 import com.newash.videocast.server.StreamingService
 import com.newash.videocast.subs.EmbeddedSubtitles
 import com.newash.videocast.subs.OpenSubtitlesClient
+import com.newash.videocast.subs.SiblingSubtitles
 import com.newash.videocast.subs.SubtitleConverter
 import com.newash.videocast.util.localIpv4
 import kotlinx.coroutines.CancellationException
@@ -32,6 +35,7 @@ import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.util.Locale
 
 data class VideoFile(val uri: Uri, val name: String, val sizeBytes: Long, val mime: String)
 
@@ -68,6 +72,8 @@ data class UiState(
     val embeddedTracks: List<EmbeddedSubtitles.Track> = emptyList(),
     /** Label of the embedded track being extracted; null when idle. */
     val extracting: String? = null,
+    /** Set when sibling-subtitle auto-pick needs folder access; tapping the status line grants it. */
+    val subtitleFolderHint: Uri? = null,
 ) {
     val defaultQuery: String get() = video?.name?.toSearchQuery().orEmpty()
     val subtitleDirty: Boolean get() = cast.hasMedia && subtitle?.name != castSubtitle
@@ -151,6 +157,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     video = video,
                     embeddedTracks = emptyList(),
+                    subtitleFolderHint = null,
                     // Error prevention beats error reporting: warn at pick time.
                     note = if (video.sizeBytes <= 0) {
                         Note("Video size unknown — casting will fail; pick it via a different provider")
@@ -175,7 +182,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .sortedByDescending { it.language?.startsWith(preferred) == true }
             // Only annotate the still-current video (picks can race the probe).
             _state.update { if (it.video?.uri == uri) it.copy(embeddedTracks = tracks) else it }
+            autoSelectSubtitle(uri, tracks, preferred)
         }
+    }
+
+    /**
+     * Auto-pick for a fresh video, in strict order: sibling file tagged with the
+     * saved language, then a plain undecorated sibling, then an embedded track
+     * in the saved language. Sibling lookup needs a persisted folder grant; when
+     * it's missing, the embedded rule still applies and the status line offers
+     * the one-time grant.
+     */
+    private suspend fun autoSelectSubtitle(uri: Uri, tracks: List<EmbeddedSubtitles.Track>, lang: String) {
+        val video = _state.value.video?.takeIf { it.uri == uri } ?: return
+        val langTags = setOfNotNull(
+            lang,
+            runCatching { Locale(lang).isO3Language.lowercase() }.getOrNull()?.takeIf { it.isNotBlank() },
+        )
+        val sibling = runCatching {
+            runInterruptible(Dispatchers.IO) { findSiblingSubtitle(video, langTags) }
+        }.getOrDefault(Sibling.None)
+        if (_state.value.video?.uri != uri) return // a newer pick raced us
+        // Rules 1–2 blocked by the sandbox: offer the grant even when rule 3
+        // lands, since a granted folder would outrank the embedded pick next time.
+        if (sibling is Sibling.NoAccess) {
+            _state.update { if (it.video?.uri == uri) it.copy(subtitleFolderHint = uri) else it }
+        }
+        when {
+            sibling is Sibling.Found -> onSubtitlePicked(sibling.uri)
+            else -> tracks.firstOrNull { it.language?.startsWith(lang) == true }?.let(::pickEmbeddedTrack)
+        }
+    }
+
+    private sealed interface Sibling {
+        class Found(val uri: Uri) : Sibling
+        data object NoAccess : Sibling
+        data object None : Sibling
+    }
+
+    /** Rules 1–2: best subtitle file next to the video, via a persisted tree grant. */
+    private fun findSiblingSubtitle(video: VideoFile, langTags: Set<String>): Sibling {
+        if (!DocumentsContract.isDocumentUri(app, video.uri)) return Sibling.None
+        val docId = DocumentsContract.getDocumentId(video.uri)
+        val parentId = docId.substringBeforeLast('/', "").ifEmpty { return Sibling.None }
+        val tree = app.contentResolver.persistedUriPermissions.firstOrNull { perm ->
+            perm.isReadPermission && perm.uri.authority == video.uri.authority &&
+                runCatching { DocumentsContract.getTreeDocumentId(perm.uri) }.getOrNull()
+                    ?.let { treeId -> docId.startsWith("$treeId/") || (treeId.endsWith(":") && docId.startsWith(treeId)) } == true
+        } ?: return Sibling.NoAccess
+        val children = mutableMapOf<String, String>() // display name → document id
+        app.contentResolver.query(
+            DocumentsContract.buildChildDocumentsUriUsingTree(tree.uri, parentId),
+            arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_DOCUMENT_ID),
+            null, null, null,
+        )?.use { cursor ->
+            while (cursor.moveToNext()) children[cursor.getString(0)] = cursor.getString(1)
+        }
+        val best = SiblingSubtitles.bestMatch(video.name, langTags, children.keys.toList()) ?: return Sibling.None
+        return Sibling.Found(DocumentsContract.buildDocumentUriUsingTree(tree.uri, children.getValue(best)))
+    }
+
+    /** The one-time folder grant from the status-line hint; then auto-pick reruns. */
+    fun onSubtitleFolderPicked(treeUri: Uri) {
+        app.contentResolver.takePersistableUriPermission(treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        _state.update { it.copy(subtitleFolderHint = null) }
+        _state.value.video?.uri?.let(::probeEmbeddedTracks)
     }
 
     fun pickEmbeddedTrack(track: EmbeddedSubtitles.Track) {
@@ -287,6 +358,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ServerHolder.server?.subtitleVtt = track?.vtt
         // No status message: the Cast button itself turns into the re-cast
         // affordance when the loaded subtitle differs from the cast one.
+        // The folder hint survives on purpose: a grant upgrades future auto-picks.
         _state.update { it.copy(subtitle = track, note = null) }
     }
 

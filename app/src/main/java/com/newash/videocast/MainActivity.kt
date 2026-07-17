@@ -16,6 +16,7 @@ import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts.OpenDocument
+import androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree
 import androidx.activity.result.contract.ActivityResultContracts.RequestPermission
 import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
@@ -43,6 +44,8 @@ class MainActivity : AppCompatActivity() {
 
     private val pickVideo = registerForActivityResult(OpenDocument()) { it?.let(vm::onVideoPicked) }
     private val pickSubtitle = registerForActivityResult(OpenDocument()) { it?.let(vm::onSubtitlePicked) }
+    private val pickSubtitleFolder =
+        registerForActivityResult(OpenDocumentTree()) { it?.let(vm::onSubtitleFolderPicked) }
     private val askNotifications = registerForActivityResult(RequestPermission()) {}
 
     private val castIcon by lazy { findViewById<MediaRouteButton>(R.id.cast_button) }
@@ -116,7 +119,14 @@ class MainActivity : AppCompatActivity() {
         playPause.onClick(vm::togglePlayPause)
         rewind.onClick { vm.seekBy(-10_000) }
         forward.onClick { vm.seekBy(30_000) }
-        statusView.onClick { vm.state.value.crash?.let(::showCrashDialog) }
+        statusView.onClick {
+            val state = vm.state.value
+            when {
+                state.crash != null -> showCrashDialog(state.crash)
+                state.subtitleFolderHint != null -> pickSubtitleFolder.launch(state.subtitleFolderHint)
+                else -> {}
+            }
+        }
 
         seek.onSeek(
             onPreview = { fraction ->
@@ -217,6 +227,7 @@ class MainActivity : AppCompatActivity() {
         val (text, isError) = when {
             state.crash != null -> getString(R.string.crash_notice) to true
             state.note != null -> state.note.text to true
+            state.subtitleFolderHint != null -> getString(R.string.subtitle_folder_hint) to false
             state.loading -> getString(R.string.loading_on_tv) to false
             state.cast.hasMedia -> null to false
             !state.cast.connected -> getString(R.string.ready_connect) to false

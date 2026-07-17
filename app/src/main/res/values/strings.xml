@@ -32,6 +32,7 @@
     <string name="ready_to">Ready — %1$s</string>
     <string name="buffering">Buffering…</string>
     <string name="crash_notice">App crashed last time — tap for details</string>
+    <string name="subtitle_folder_hint">Auto-pick subtitle files next to videos — tap to allow folder access</string>
     <string name="volume">Vol</string>
 
     <string name="search">Search</string>
