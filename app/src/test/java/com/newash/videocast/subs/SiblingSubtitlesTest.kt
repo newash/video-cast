@@ -53,6 +53,24 @@ class SiblingSubtitlesTest {
     }
 
     @Test
+    fun `region-tagged spelling of the saved language matches`() {
+        assertEquals(
+            "House.of.the.Dragon.S01E01.720p.x265.pt-br.srt",
+            SiblingSubtitles.bestMatch(
+                video, setOf("pt", "por"),
+                listOf("House.of.the.Dragon.S01E01.720p.x265.pt-br.srt"),
+            ),
+        )
+        // Estonian must not match Spanish through primary-code normalization.
+        assertNull(
+            SiblingSubtitles.bestMatch(
+                video, setOf("es", "spa"),
+                listOf("House.of.the.Dragon.S01E01.720p.x265.est.srt"),
+            ),
+        )
+    }
+
+    @Test
     fun `tie between tagged names goes to the least decorated`() {
         assertEquals(
             "House.of.the.Dragon.S01E01.720p.x265.en.ass",

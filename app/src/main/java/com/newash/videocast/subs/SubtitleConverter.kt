@@ -88,10 +88,10 @@ object SubtitleConverter {
     data class Cue(val startMs: Long, val endMs: Long, val text: String)
 
     fun cuesToVtt(cues: List<Cue>): String = cues
-        .filter { it.text.isNotBlank() && it.endMs > it.startMs }
+        .filter { it.text.isNotBlank() && it.endMs > it.startMs.coerceAtLeast(0) }
         .sortedBy(Cue::startMs)
         .joinToString(separator = "\n\n", prefix = "WEBVTT\n\n", postfix = "\n") { cue ->
-            "${cue.startMs.toVttTime()} --> ${cue.endMs.toVttTime()}\n${cue.text}"
+            "${cue.startMs.coerceAtLeast(0).toVttTime()} --> ${cue.endMs.toVttTime()}\n${cue.text.toCueText()}"
         }
 
     /**
@@ -128,6 +128,13 @@ object SubtitleConverter {
         // A blank line would terminate the VTT cue early ("foo\N\Nbar" drops "bar").
         .replace(BLANK_LINES, "\n")
         .trim()
+
+    /**
+     * Extraction payloads are arbitrary text: a blank line ends a VTT cue early
+     * (dropping the rest), and a "-->" inside the payload corrupts the parse.
+     */
+    private fun String.toCueText(): String =
+        normalized().replace(BLANK_LINES, "\n").replace("-->", "→").trim()
 
     private fun String.normalized(): String = replace("\r\n", "\n").replace('\r', '\n')
 

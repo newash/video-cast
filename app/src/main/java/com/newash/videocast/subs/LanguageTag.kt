@@ -20,7 +20,7 @@ object LanguageTag {
             2 -> language.takeIf { it in TWO_LETTER } ?: return null
             3 -> ISO3_TO_ISO1[language] ?: BIBLIOGRAPHIC[language] ?: language // honest beats wrong
             else -> return null
-        }
+        }.let { NEW_CODES[it] ?: it }
         // A region only stays when it says something the language doesn't:
         // "pt-br" is meaningful, "hu-hu" is container noise.
         val region = parts.getOrNull(1)
@@ -49,6 +49,11 @@ object LanguageTag {
     fun displayName(tag: String?): String? = primary(tag)
         ?.let { Locale(it).displayLanguage }
         ?.takeIf { it.isNotBlank() && !it.equals(primary(tag), ignoreCase = true) }
+
+    // The 1989 ISO 639 renames: Locale's tables carry both spellings, and the
+    // ISO3 reverse map can land on the legacy one ("heb" → "iw") — which breaks
+    // matching against the modern code and leaks into OpenSubtitles queries.
+    private val NEW_CODES = mapOf("iw" to "he", "in" to "id", "ji" to "yi")
 
     private val TWO_LETTER: Set<String> = Locale.getISOLanguages().toSet()
 

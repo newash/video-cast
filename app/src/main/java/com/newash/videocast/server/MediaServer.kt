@@ -71,7 +71,9 @@ class MediaServer(private val context: Context, val port: Int) {
         // a cached copy on the receiver would pin the stale cues.
         resp.headers.add("Cache-Control", "no-store")
         resp.sendHeaders(200, length, -1, null, "text/vtt; charset=utf-8", null)
-        resp.sendBody(bytes.inputStream(), length, null)
+        // Explicitly registered HEAD bypasses JLHTTP's discard-body path: a body
+        // sent here would desync the next response on a keep-alive connection.
+        if (req.method != "HEAD") resp.sendBody(bytes.inputStream(), length, null)
         return 0
     }
 
@@ -95,6 +97,8 @@ class MediaServer(private val context: Context, val port: Int) {
             openStream(video)
         } catch (_: IOException) {
             return 404
+        } catch (_: SecurityException) {
+            return 404 // revoked SAF grant — same answer as a vanished file
         }
         stream.use {
             resp.sendHeaders(200, total, -1, null, video.mime, range) // a range flips this to 206

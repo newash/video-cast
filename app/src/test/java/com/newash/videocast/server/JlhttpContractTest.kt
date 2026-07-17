@@ -4,11 +4,13 @@ import net.freeutils.httpserver.HTTPServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.ServerSocket
+import java.net.Socket
 import java.net.URL
 
 /**
@@ -34,27 +36,40 @@ class JlhttpContractTest {
         } ?: error("could not bind a test server port")
     }
 
+    // Mirrors MediaServer: HEAD registered explicitly, which bypasses JLHTTP's
+    // default HEAD handling — so the handlers themselves must guard the body.
     private fun buildServer(port: Int): HTTPServer = HTTPServer(port).apply {
-        getVirtualHost(null).addContext("/video", { req, resp ->
-            resp.headers.run {
-                add("Access-Control-Allow-Origin", "*")
-                add("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
-            }
-            if (req.method == "OPTIONS") {
-                resp.sendHeaders(204)
-                return@addContext 0
-            }
-            val total = file.length()
-            resp.headers.add("Accept-Ranges", "bytes")
-            val range = req.getRange(total)
-            if (range != null && range[0] >= total) {
-                resp.headers.add("Content-Range", "bytes */$total")
-                return@addContext 416
-            }
-            resp.sendHeaders(200, total, -1, null, "video/mp4", range)
-            file.inputStream().use { resp.sendBody(it, total, range) }
-            0
-        }, "GET", "OPTIONS")
+        getVirtualHost(null).run {
+            addContext("/video", { req, resp ->
+                resp.headers.run {
+                    add("Access-Control-Allow-Origin", "*")
+                    add("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+                }
+                if (req.method == "OPTIONS") {
+                    resp.sendHeaders(204)
+                    return@addContext 0
+                }
+                val total = file.length()
+                resp.headers.add("Accept-Ranges", "bytes")
+                val range = req.getRange(total)
+                if (range != null && range[0] >= total) {
+                    resp.headers.add("Content-Range", "bytes */$total")
+                    return@addContext 416
+                }
+                if (req.method == "HEAD") {
+                    resp.sendHeaders(200, total, -1, null, "video/mp4", range)
+                    return@addContext 0
+                }
+                resp.sendHeaders(200, total, -1, null, "video/mp4", range)
+                file.inputStream().use { resp.sendBody(it, total, range) }
+                0
+            }, "GET", "HEAD", "OPTIONS")
+            addContext("/subs.vtt", { req, resp ->
+                resp.sendHeaders(200, SUBS.size.toLong(), -1, null, "text/vtt; charset=utf-8", null)
+                if (req.method != "HEAD") resp.sendBody(SUBS.inputStream(), SUBS.size.toLong(), null)
+                0
+            }, "GET", "HEAD")
+        }
     }
 
     @After
@@ -130,5 +145,23 @@ class JlhttpContractTest {
         // The subtitle URL carries a cache-busting ?v=N; routing must ignore it.
         assertEquals(200, responseCode)
         assertEquals("1000", getHeaderField("Content-Length"))
+    }
+
+    @Test
+    fun `explicitly registered head sends no body bytes`() {
+        // Raw socket: HttpURLConnection ignores an (incorrect) HEAD body, but on
+        // a keep-alive connection it would desync every following response.
+        Socket("127.0.0.1", port).use { socket ->
+            socket.getOutputStream()
+                .write("HEAD /subs.vtt HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n".toByteArray())
+            val response = socket.getInputStream().readBytes().toString(Charsets.ISO_8859_1)
+            assertTrue(response.startsWith("HTTP/1.1 200"))
+            assertTrue(response.lowercase().contains("content-length: ${SUBS.size}"))
+            assertEquals("", response.substringAfter("\r\n\r\n"))
+        }
+    }
+
+    private companion object {
+        val SUBS = "WEBVTT\n\nhello".toByteArray()
     }
 }

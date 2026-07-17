@@ -20,6 +20,17 @@ class LanguageTagTest {
     }
 
     @Test
+    fun `legacy 1989 codes normalize to their modern spelling`() {
+        // Locale's ISO3 reverse map lands on the pre-1989 codes (iw/in/ji);
+        // OpenSubtitles and human expectation use he/id/yi.
+        assertEquals("he", LanguageTag.normalize("heb"))
+        assertEquals("he", LanguageTag.normalize("iw"))
+        assertEquals("id", LanguageTag.normalize("ind"))
+        assertTrue(LanguageTag.matches("heb", "he"))
+        assertTrue(LanguageTag.matches("ind", "id"))
+    }
+
+    @Test
     fun `unknown or empty tags become null, unmappable real codes pass through`() {
         assertNull(LanguageTag.normalize(null))
         assertNull(LanguageTag.normalize(""))

@@ -70,7 +70,11 @@ object SiblingSubtitles {
                 .split('.').filter(String::isNotEmpty).map(String::lowercase)
             return when {
                 tokens.isEmpty() -> 2 // plain "base.ext"
-                tokens.any(langTags::contains) -> 1 // carries the saved language
+                // Direct hit, or a region-tagged spelling of a saved language
+                // ("pt-br" matches saved "pt"; "est" stays Estonian, not Spanish).
+                tokens.any { token ->
+                    token in langTags || LanguageTag.primary(token)?.let { it in langTags } == true
+                } -> 1
                 else -> null // some other language's (or unrelated) file
             }
         }

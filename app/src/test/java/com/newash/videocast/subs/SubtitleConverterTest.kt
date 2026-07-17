@@ -1,6 +1,7 @@
 package com.newash.videocast.subs
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -126,6 +127,23 @@ class SubtitleConverterTest {
 
         val vtt = SubtitleConverter.assToVtt(ass)
         assertTrue(vtt.contains("foo\nbar"))
+    }
+
+    @Test
+    fun `cue payloads are sanitized against vtt structure breaks`() {
+        val vtt = SubtitleConverter.cuesToVtt(
+            listOf(
+                // Extraction payloads are arbitrary: ffmpeg-muxed SRT-in-MKV
+                // realistically contains consecutive newlines.
+                SubtitleConverter.Cue(1000, 2000, "foo\n\nbar"),
+                SubtitleConverter.Cue(3000, 4000, "a --> b"),
+                SubtitleConverter.Cue(-500, 6000, "early"),
+            )
+        )
+        assertTrue(vtt.contains("foo\nbar")) // a blank line would end the cue there
+        assertFalse(vtt.contains("a --> b")) // "-->" in a payload corrupts the parse
+        assertTrue(vtt.contains("a → b"))
+        assertTrue(vtt.contains("00:00:00.000 --> 00:00:06.000\nearly")) // clamped, not negative
     }
 
     @Test

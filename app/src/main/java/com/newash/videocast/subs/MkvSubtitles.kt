@@ -229,14 +229,18 @@ object MkvSubtitles {
     ): List<RawBlock>? {
         if (!seekable) return null
         val entries = head.cues ?: head.cuesPosition?.let { pos ->
-            runCatching {
+            try {
                 // Time the jump: it calibrates how big a gap must be to be worth seeking.
                 val before = System.nanoTime()
                 seekTo(segStart + pos)
                 val header = nextHeader()?.takeIf { it.id == ID_CUES } ?: return null
                 calibrateSeekCost(System.nanoTime() - before)
                 readCues(header.size, trackNumber)
-            }.getOrNull() ?: return null
+            } catch (e: InterruptedIOException) {
+                throw e // cancellation — must not degrade into starting a full scan
+            } catch (_: IOException) {
+                return null // unreadable index: fall back to the full scan
+            }
         } ?: return null
         if (entries.isEmpty()) return null
 
@@ -250,7 +254,7 @@ object MkvSubtitles {
         try {
             for ((index, entry) in sorted.withIndex()) {
                 snapshot?.pollNow(blocks)
-                onProgress(index * 100 / sorted.size) // real work done: cues visited
+                onProgress((index + 1) * 100 / sorted.size) // real work done: cues visited
                 if (entry.clusterPos != clusterPos) {
                     clusterPos = entry.clusterPos
                     advanceTo(segStart + entry.clusterPos)
@@ -297,8 +301,10 @@ object MkvSubtitles {
     ): List<RawBlock> {
         val blocks = mutableListOf<RawBlock>()
         if (head.firstClusterAt < 0) return blocks
-        // The cues attempt may have moved us; a pushed-back header means we never left.
-        if (seekable && !hasPushedBack) runCatching { seekTo(head.firstClusterAt) }
+        // The cues attempt may have moved us; only a header pushed back at the
+        // first cluster proves we never left (an unknown-size cluster walked on
+        // the indexed route can leave a mid-file pushback behind).
+        if (seekable && pushedBackStart != head.firstClusterAt) runCatching { seekTo(head.firstClusterAt) }
         try {
             while (true) {
                 val header = nextHeader() ?: break
@@ -368,7 +374,7 @@ object MkvSubtitles {
         size: Long,
         trackNumber: Long,
         out: MutableList<RawBlock>,
-        snapshot: SnapshotEmitter? = null,
+        snapshot: SnapshotEmitter?,
     ) {
         var clusterTs = 0L
         forEachChild(size, TOP_LEVEL_IDS + ID_CLUSTER) { id, childSize ->
@@ -413,7 +419,7 @@ object MkvSubtitles {
             skip(body)
             return null
         }
-        return relative to String(readBytes(body.toInt()), Charsets.UTF_8)
+        return relative to String(readBytes(body), Charsets.UTF_8)
     }
 
     /**
@@ -450,7 +456,7 @@ object MkvSubtitles {
 
     // EBML strings may be NUL-padded, and Kotlin's trim() does not trim U+0000.
     private fun Source.readString(size: Long): String =
-        String(readBytes(size.toInt()), Charsets.UTF_8).trimEnd { it == '\u0000' || it.isWhitespace() }.trim()
+        String(readBytes(size), Charsets.UTF_8).trimEnd { it == '\u0000' || it.isWhitespace() }.trim()
 
     // ------------------------------------------------------------------ EBML
 
@@ -514,7 +520,8 @@ object MkvSubtitles {
         private var readBytesTotal = 0L
         private var readNanosTotal = 0L
 
-        val hasPushedBack get() = pushedBack != null
+        /** Where the pushed-back header starts, or null when none is held. */
+        val pushedBackStart get() = pushedBack?.start
 
         // The header's bytes are already consumed, so position stays untouched.
         fun pushBack(header: Header) {
@@ -552,6 +559,12 @@ object MkvSubtitles {
         fun readByteOrEof(): Int = input.read().also { if (it >= 0) position++ }
 
         fun readByte(): Int = readByteOrEof().also { if (it < 0) throw EOFException() }
+
+        /** Long overload: a corrupt 64-bit size must fail here, not truncate in toInt(). */
+        fun readBytes(n: Long): ByteArray {
+            if (n < 0 || n > MAX_ELEMENT_BYTES) throw IOException("implausible element size: $n")
+            return readBytes(n.toInt())
+        }
 
         fun readBytes(n: Int): ByteArray {
             // Corrupt element sizes must fail as IOException, not NegativeArraySize/OOM Errors.
