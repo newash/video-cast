@@ -63,7 +63,9 @@ class MediaServer(private val context: Context, val port: Int) {
     }
 
     private fun serveSubtitles(req: HTTPServer.Request, resp: HTTPServer.Response): Int {
-        val bytes = (subtitleVtt ?: return 404).toByteArray(Charsets.UTF_8)
+        // Never 404: a failed sidecar fetch can kill the receiver's whole load,
+        // and requests only arrive when a load declared the track.
+        val bytes = (subtitleVtt ?: EMPTY_VTT).toByteArray(Charsets.UTF_8)
         val length = bytes.size.toLong()
         // no-store: the VTT can be replaced mid-session (late-finished extraction);
         // a cached copy on the receiver would pin the stale cues.

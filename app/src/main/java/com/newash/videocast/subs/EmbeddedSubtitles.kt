@@ -41,6 +41,19 @@ object EmbeddedSubtitles {
 
     enum class Container { MKV, MP4 }
 
+    /**
+     * Early-VTT hook for [extractVtt], MKV only: [onVtt] fires (at most once, on
+     * the extraction thread) with a valid VTT of the cues collected so far, when
+     * the walk passes [untilMs] or [requestNow] is called. The final full VTT
+     * supersedes it. Inert for MP4 (its extraction has no incremental phase).
+     */
+    class Snapshot(val untilMs: Long, val onVtt: (String) -> Unit) {
+        internal val now = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        /** Any thread: emit at the next block boundary instead of waiting for [untilMs]. */
+        fun requestNow() = now.set(true)
+    }
+
     /** One stream serves both the sniff and the MKV header walk (MP4 needs its own fd). */
     fun listTracks(context: Context, uri: Uri): List<Track> = context.contentResolver.reading(uri) { raw ->
         val stream = BufferedInputStream(raw, SNIFF_BYTES)
@@ -83,13 +96,21 @@ object EmbeddedSubtitles {
         track: Track,
         onOpen: (AutoCloseable) -> Unit = {},
         onProgress: (Int) -> Unit = {},
+        snapshot: Snapshot? = null,
     ): String {
         val cues = when (track.container) {
             // A real file descriptor unlocks the walker's Cues-index fast path
             // (both local SAF files and provider proxy descriptors are seekable).
             Container.MKV -> context.contentResolver.seekableOrStream(uri) { stream ->
                 onOpen(stream)
-                MkvSubtitles.extract(stream, track.id, track.codecId, onProgress)
+                MkvSubtitles.extract(
+                    stream, track.id, track.codecId, onProgress,
+                    snapshot?.let { s ->
+                        MkvSubtitles.SnapshotRequest(s.untilMs, s.now) { cues ->
+                            s.onVtt(SubtitleConverter.cuesToVtt(cues))
+                        }
+                    },
+                )
             }
             Container.MP4 -> Mp4Subtitles.extract(context, uri, track.id.toInt())
         }

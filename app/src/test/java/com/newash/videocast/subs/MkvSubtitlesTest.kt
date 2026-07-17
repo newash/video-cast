@@ -7,6 +7,7 @@ import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Exercises the EBML walker against synthetic MKV files built byte by byte. */
 class MkvSubtitlesTest {
@@ -300,5 +301,93 @@ class MkvSubtitlesTest {
             listOf(SubtitleConverter.Cue(300, 900, "found by cluster scan")),
             file.extractSrt(),
         )
+    }
+
+    // ------------------------------------------------------------- snapshots
+
+    private class SnapProbe(untilMs: Long, now: Boolean = false) {
+        val calls = mutableListOf<List<SubtitleConverter.Cue>>()
+        val request = MkvSubtitles.SnapshotRequest(untilMs, AtomicBoolean(now)) { calls += it }
+    }
+
+    @Test
+    fun `scan path snapshot fires once the walk passes untilMs`() {
+        val data = mkv(
+            header, tracks,
+            element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "one")),
+            element(0x1F43B675, uint(0xE7, 40_000), blockGroup(2, 0, 1000, "two")),
+            element(0x1F43B675, uint(0xE7, 80_000), blockGroup(2, 0, 1000, "three")),
+        )
+        val probe = SnapProbe(untilMs = 20_000)
+        val full = MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8", snapshot = probe.request)
+        // The crossing cluster's cues are included: prefix is a superset in time.
+        assertEquals(listOf(listOf("one", "two")), probe.calls.map { call -> call.map { it.text } })
+        assertEquals(listOf("one", "two", "three"), full.map { it.text })
+    }
+
+    @Test
+    fun `nudge set before any cue emits an empty snapshot`() {
+        val data = mkv(
+            header, tracks,
+            element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "only")),
+        )
+        val probe = SnapProbe(untilMs = Long.MAX_VALUE, now = true)
+        val full = MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8", snapshot = probe.request)
+        assertEquals(listOf(emptyList<SubtitleConverter.Cue>()), probe.calls)
+        assertEquals(listOf("only"), full.map { it.text })
+    }
+
+    @Test
+    fun `indexed path snapshot at the entry threshold`() {
+        val timestamp = uint(0xE7, 0)
+        val decoy = simpleBlock(1, 0, "video decoy")
+        val first = simpleBlock(2, 500, "early")
+        val second = simpleBlock(2, 5000, "late")
+        val cluster = element(0x1F43B675, timestamp, decoy, first, second)
+        val shLen = seekHeadToCues(0).size.toLong()
+        val clusterPos = shLen + header.size + tracks.size
+        val cuesPos = clusterPos + cluster.size
+        val relFirst = (timestamp.size + decoy.size).toLong()
+        val relSecond = relFirst + first.size
+        val cues = element(
+            0x1C53BB6B,
+            cuePoint(500, 2, clusterPos, relFirst, durationMs = null),
+            cuePoint(5000, 2, clusterPos, relSecond, durationMs = null),
+        )
+        val probe = SnapProbe(untilMs = 1000)
+        val file = tempMkv(mkv(seekHeadToCues(cuesPos), header, tracks, cluster, cues))
+        val full = FileInputStream(file).use {
+            MkvSubtitles.extract(it, 2, "S_TEXT/UTF8", snapshot = probe.request)
+        }
+        // Prefix's last cue carries the fallback cap; the full set corrects it.
+        assertEquals(listOf(SubtitleConverter.Cue(500, 8500, "early")), probe.calls.single())
+        assertEquals(5000L, full.first().endMs)
+    }
+
+    @Test
+    fun `snapshot then truncation - full result is the same partial`() {
+        val data = mkv(
+            header, tracks,
+            element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "one")),
+            element(0x1F43B675, uint(0xE7, 40_000), blockGroup(2, 0, 1000, "two")),
+            element(0x1F43B675, uint(0xE7, 80_000), blockGroup(2, 0, 1000, "lost")),
+        )
+        val probe = SnapProbe(untilMs = 10_000)
+        val full = MkvSubtitles.extract(
+            ByteArrayInputStream(data.copyOf(data.size - 6)), 2, "S_TEXT/UTF8", snapshot = probe.request
+        )
+        assertEquals(listOf("one", "two"), probe.calls.single().map { it.text })
+        assertEquals(listOf("one", "two"), full.map { it.text })
+    }
+
+    @Test
+    fun `untilMs beyond the last cue never snapshots`() {
+        val data = mkv(
+            header, tracks,
+            element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "one")),
+        )
+        val probe = SnapProbe(untilMs = Long.MAX_VALUE)
+        MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8", snapshot = probe.request)
+        assertTrue(probe.calls.isEmpty())
     }
 }

@@ -185,19 +185,23 @@ Candidates considered:
   `MediaInfo`; a ready track is activated via `setActiveTrackIds([1])` on
   the load request — activating at load time is far more reliable than
   toggling after.
-- **Casting never waits for extraction.** The Cast track list is immutable
-  after load, so when an embedded extraction is still running the load
-  declares the track anyway over a valid-but-empty VTT (`WEBVTT\n\n`,
-  `Cache-Control: no-store`) and leaves it inactive. When the extraction
-  finishes mid-playback, `setActiveMediaTracks` flips it on — the
-  progressive path fetches the sidecar at first activation, so the full
-  cue set appears with no interruption. If the track was already active
-  (subtitle replaced mid-cast), the app reloads at the current position
-  with a bumped `?v=` instead — one short hiccup. The extraction's
-  sequential read overlaps rclone's VFS cache of the cast stream, so
-  network cost stays ~1× the file; a tee inside the server was evaluated
-  and rejected (cues would trail the playhead and the cache already
-  deduplicates the bytes).
+- **Casting barely waits for extraction, and subtitles cover from 0:00.**
+  The extraction starts at pick time, so by the time the user taps Play it
+  has typically covered the first many minutes of the file. Play then asks
+  the running extraction for a snapshot of the cues collected so far (the
+  walker's one pass emits it at the next block boundary; a ~4 s gate
+  bounds the wait for a lightning-fast tap) and loads with that snapshot
+  as the active track — subtitles from 0:00, near-instant start. When the
+  extraction completes mid-playback, the app reloads at the current
+  position with a bumped `?v=` track URL (`Cache-Control: no-store`) —
+  one short hiccup, then the complete cue set. Manually picked files and
+  OpenSubtitles downloads use the same late-attach reload when a cast is
+  running. The extraction's sequential read overlaps rclone's VFS cache
+  of the cast stream, so network cost stays ~1× the file. Evaluated and
+  rejected: a tee inside the server (cues trail the playhead; the cache
+  already deduplicates bytes), growing/streamed sidecars (the receiver
+  fetches once), and multi-track activation ratchets (rest on undocumented
+  receiver fetch timing).
 
 ### Surviving screen-off
 
