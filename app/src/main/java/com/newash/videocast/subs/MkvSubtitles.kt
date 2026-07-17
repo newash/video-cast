@@ -6,7 +6,6 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.InterruptedIOException
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Minimal Matroska (EBML) reader for embedded text subtitle tracks. Android's
@@ -64,51 +63,29 @@ object MkvSubtitles {
     }
 
     /**
-     * Early-result hook for [extract]: when [now] is set from any thread, the
-     * pass emits the cues collected so far (at most once, on the extraction
-     * thread, at the next block boundary). The final result supersedes the
-     * prefix; an empty list is possible (nudge before any cue). The callback
-     * must not throw.
+     * All cues of the track, in play order: via the Cues index when usable,
+     * else a full scan. [onCues] is called on the extraction thread after each
+     * cluster / index entry with a fresh list of ALL cues collected so far —
+     * each call supersedes the previous. A consumer that stores the latest
+     * list in a volatile can serve subtitles-so-far at any moment while the
+     * extraction runs (how Play casts instantly with subtitles from 0:00).
      */
-    class SnapshotRequest(
-        val now: AtomicBoolean = AtomicBoolean(false),
-        val onSnapshot: (List<SubtitleConverter.Cue>) -> Unit,
-    )
-
-    /** All cues of the track, in play order: via the Cues index when usable, else a full scan. */
     fun extract(
         input: InputStream,
         trackNumber: Long,
         codecId: String,
         onProgress: (percent: Int) -> Unit = {},
-        snapshot: SnapshotRequest? = null,
+        onCues: ((List<SubtitleConverter.Cue>) -> Unit)? = null,
     ): List<SubtitleConverter.Cue> {
         val source = Source(input)
         source.enterSegment()
         val segStart = source.position
         val head = source.readHead(trackNumber)
-        val emitter = snapshot?.let { request ->
-            SnapshotEmitter(request) { blocks -> request.onSnapshot(blocks.toCues(head.scaleNs, codecId)) }
-        }
-        val blocks = source.readIndexedBlocks(segStart, head, trackNumber, onProgress, emitter)
-            ?: source.scanClusters(head, trackNumber, onProgress, emitter)
+        val publish: ((List<RawBlock>) -> Unit)? =
+            onCues?.let { cb -> { blocks -> cb(blocks.toCues(head.scaleNs, codecId)) } }
+        val blocks = source.readIndexedBlocks(segStart, head, trackNumber, onProgress, publish)
+            ?: source.scanClusters(head, trackNumber, onProgress, publish)
         return blocks.toCues(head.scaleNs, codecId)
-    }
-
-    /** Once-only nudge latch around a [SnapshotRequest]; one instance per pass. */
-    private class SnapshotEmitter(
-        private val request: SnapshotRequest,
-        private val sink: (List<RawBlock>) -> Unit,
-    ) {
-        private var emitted = false
-
-        /** Nudge poll — cheap enough for the per-block loops. */
-        fun pollNow(blocks: List<RawBlock>) {
-            if (!emitted && request.now.get()) {
-                emitted = true
-                sink(blocks)
-            }
-        }
     }
 
     // ---------------------------------------------------------------- cues
@@ -225,7 +202,7 @@ object MkvSubtitles {
         head: Head,
         trackNumber: Long,
         onProgress: (Int) -> Unit,
-        snapshot: SnapshotEmitter?,
+        publish: ((List<RawBlock>) -> Unit)?,
     ): List<RawBlock>? {
         if (!seekable) return null
         val entries = head.cues ?: head.cuesPosition?.let { pos ->
@@ -253,7 +230,6 @@ object MkvSubtitles {
         var clusterScanned = false
         try {
             for ((index, entry) in sorted.withIndex()) {
-                snapshot?.pollNow(blocks)
                 onProgress((index + 1) * 100 / sorted.size) // real work done: cues visited
                 if (entry.clusterPos != clusterPos) {
                     clusterPos = entry.clusterPos
@@ -263,8 +239,9 @@ object MkvSubtitles {
                     clusterScanned = false
                     if (entry.relPos == null) {
                         // Pre-2013 muxer without relative positions: scan this one cluster.
-                        readCluster(cluster.size, trackNumber, blocks, snapshot)
+                        readCluster(cluster.size, trackNumber, blocks)
                         clusterScanned = true
+                        publish?.invoke(blocks)
                     }
                 }
                 if (clusterScanned) continue
@@ -277,6 +254,7 @@ object MkvSubtitles {
                     else -> null // index points at garbage: don't trust any of it
                 } ?: return null // no (or wrong-track) block at the indexed position: full scan instead
                 blocks += RawBlock(entry.timeTicks, blockDuration ?: entry.durationTicks, payload)
+                publish?.invoke(blocks)
             }
         } catch (_: EOFException) {
             // Truncated file: keep what we got instead of failing the whole track.
@@ -297,7 +275,7 @@ object MkvSubtitles {
         head: Head,
         trackNumber: Long,
         onProgress: (Int) -> Unit,
-        snapshot: SnapshotEmitter?,
+        publish: ((List<RawBlock>) -> Unit)?,
     ): List<RawBlock> {
         val blocks = mutableListOf<RawBlock>()
         if (head.firstClusterAt < 0) return blocks
@@ -308,10 +286,13 @@ object MkvSubtitles {
         try {
             while (true) {
                 val header = nextHeader() ?: break
-                snapshot?.pollNow(blocks)
                 fileSize?.let { onProgress((position * 100 / it).toInt().coerceIn(0, 100)) }
-                if (header.id == ID_CLUSTER) readCluster(header.size, trackNumber, blocks, snapshot)
-                else skipElement(header.id, header.size)
+                if (header.id == ID_CLUSTER) {
+                    readCluster(header.size, trackNumber, blocks)
+                    publish?.invoke(blocks)
+                } else {
+                    skipElement(header.id, header.size)
+                }
             }
         } catch (_: EOFException) {
             // Truncated file: return the cues collected so far.
@@ -374,11 +355,9 @@ object MkvSubtitles {
         size: Long,
         trackNumber: Long,
         out: MutableList<RawBlock>,
-        snapshot: SnapshotEmitter?,
     ) {
         var clusterTs = 0L
         forEachChild(size, TOP_LEVEL_IDS + ID_CLUSTER) { id, childSize ->
-            snapshot?.pollNow(out) // nudge lands at the next block boundary
             when (id) {
                 ID_CLUSTER_TIMESTAMP -> clusterTs = readUInt(childSize)
                 ID_SIMPLE_BLOCK -> readBlock(childSize, trackNumber)?.let { (rel, payload) ->
@@ -517,8 +496,6 @@ object MkvSubtitles {
         private var pushedBack: Header? = null
         private val scratch = ByteArray(SKIP_CHUNK)
         private var seekThreshold = DEFAULT_SEEK_THRESHOLD
-        private var readBytesTotal = 0L
-        private var readNanosTotal = 0L
 
         /** Where the pushed-back header starts, or null when none is held. */
         val pushedBackStart get() = pushedBack?.start
@@ -548,11 +525,15 @@ object MkvSubtitles {
             }
         }
 
-        /** Gap must cost more time to read than a seek's reopen penalty to be worth seeking. */
+        /**
+         * Gap must cost more time to read than a seek's reopen penalty to be
+         * worth seeking. A nominal read rate is accurate enough: the penalty
+         * spans four orders of magnitude (µs locally, seconds over FTPS), so
+         * order-of-magnitude thresholding — with the clamp — never flips a
+         * network file into seeking or a local file into scanning.
+         */
         fun calibrateSeekCost(penaltyNanos: Long) {
-            val bytesPerNano =
-                if (readNanosTotal > 0) readBytesTotal.toDouble() / readNanosTotal else DEFAULT_BYTES_PER_NANO
-            seekThreshold = (penaltyNanos * bytesPerNano).toLong()
+            seekThreshold = (penaltyNanos * NOMINAL_BYTES_PER_NANO).toLong()
                 .coerceIn(MIN_SEEK_THRESHOLD, MAX_SEEK_THRESHOLD)
         }
 
@@ -571,16 +552,11 @@ object MkvSubtitles {
             if (n < 0 || n > MAX_ELEMENT_BYTES) throw IOException("implausible element size: $n")
             val bytes = ByteArray(n)
             var done = 0
-            val started = if (n >= TIMING_MIN_BYTES) System.nanoTime() else 0L
             while (done < n) {
                 if (Thread.interrupted()) throw InterruptedIOException("extraction cancelled")
                 val read = input.read(bytes, done, n - done)
                 if (read < 0) throw EOFException()
                 done += read
-            }
-            if (started != 0L) {
-                readNanosTotal += System.nanoTime() - started
-                readBytesTotal += n
             }
             position += n
             return bytes
@@ -603,18 +579,12 @@ object MkvSubtitles {
                     position += skipped
                 }
             }
-            val started = if (left >= TIMING_MIN_BYTES) System.nanoTime() else 0L
-            val toRead = left
             while (left > 0) {
                 if (Thread.interrupted()) throw InterruptedIOException("extraction cancelled")
                 val read = input.read(scratch, 0, minOf(left, scratch.size.toLong()).toInt())
                 if (read < 0) throw EOFException()
                 left -= read
                 position += read
-            }
-            if (started != 0L) {
-                readNanosTotal += System.nanoTime() - started
-                readBytesTotal += toRead
             }
         }
     }
@@ -630,8 +600,7 @@ object MkvSubtitles {
     private const val DEFAULT_SEEK_THRESHOLD = 256L * 1024
     private const val MIN_SEEK_THRESHOLD = 64L * 1024
     private const val MAX_SEEK_THRESHOLD = 64L * 1024 * 1024
-    private const val TIMING_MIN_BYTES = 4 * 1024
-    private const val DEFAULT_BYTES_PER_NANO = 0.05 // ~50 MB/s when unmeasured
+    private const val NOMINAL_BYTES_PER_NANO = 0.05 // ~50 MB/s
     private const val MAX_ELEMENT_BYTES = 8 * 1024 * 1024 // generous for any text payload
 
     private const val CODEC_SRT = "S_TEXT/UTF8"

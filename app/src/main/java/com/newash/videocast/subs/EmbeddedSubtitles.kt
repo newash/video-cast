@@ -7,7 +7,6 @@ import android.os.ParcelFileDescriptor
 import java.io.BufferedInputStream
 import java.io.IOException
 import java.io.InputStream
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Embedded text subtitle tracks of a picked video: MKV via [MkvSubtitles]
@@ -41,19 +40,6 @@ object EmbeddedSubtitles {
     }
 
     enum class Container { MKV, MP4 }
-
-    /**
-     * Early-VTT hook for [extractVtt], MKV only: after [requestNow], [onVtt]
-     * fires (at most once, on the extraction thread, at the next block
-     * boundary) with a valid VTT of the cues collected so far. The final full
-     * VTT supersedes it. Inert for MP4 (its extraction has no incremental phase).
-     */
-    class Snapshot(val onVtt: (String) -> Unit) {
-        internal val now = AtomicBoolean(false)
-
-        /** Any thread: emit the cues collected so far. */
-        fun requestNow() = now.set(true)
-    }
 
     /** One stream serves both the sniff and the MKV header walk (MP4 needs its own fd). */
     fun listTracks(context: Context, uri: Uri): List<Track> = context.contentResolver.reading(uri) { raw ->
@@ -89,7 +75,9 @@ object EmbeddedSubtitles {
     /**
      * Extracts the track and renders it as WebVTT. [onOpen] hands out the live
      * stream so the caller can close it to abort a blocked read on cancel;
-     * [onProgress] reports work done in percent (MKV only).
+     * [onProgress] reports work done in percent and [onCues] continuously
+     * publishes the cues collected so far (both MKV only — MP4 extraction has
+     * no incremental phase).
      */
     fun extractVtt(
         context: Context,
@@ -97,19 +85,14 @@ object EmbeddedSubtitles {
         track: Track,
         onOpen: (AutoCloseable) -> Unit = {},
         onProgress: (Int) -> Unit = {},
-        snapshot: Snapshot? = null,
+        onCues: ((List<SubtitleConverter.Cue>) -> Unit)? = null,
     ): String {
         val cues = when (track.container) {
             // A real file descriptor unlocks the walker's Cues-index fast path
             // (both local SAF files and provider proxy descriptors are seekable).
             Container.MKV -> context.contentResolver.seekableOrStream(uri) { stream ->
                 onOpen(stream)
-                MkvSubtitles.extract(
-                    stream, track.id, track.codecId, onProgress,
-                    snapshot?.let { s ->
-                        MkvSubtitles.SnapshotRequest(s.now) { cues -> s.onVtt(SubtitleConverter.cuesToVtt(cues)) }
-                    },
-                )
+                MkvSubtitles.extract(stream, track.id, track.codecId, onProgress, onCues)
             }
             Container.MP4 -> Mp4Subtitles.extract(context, uri, track.id.toInt())
         }

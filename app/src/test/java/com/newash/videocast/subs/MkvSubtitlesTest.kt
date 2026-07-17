@@ -7,7 +7,6 @@ import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
-import java.util.concurrent.atomic.AtomicBoolean
 
 /** Exercises the EBML walker against synthetic MKV files built byte by byte. */
 class MkvSubtitlesTest {
@@ -303,50 +302,28 @@ class MkvSubtitlesTest {
         )
     }
 
-    // ------------------------------------------------------------- snapshots
-
-    private class SnapProbe(now: Boolean = false) {
-        val calls = mutableListOf<List<SubtitleConverter.Cue>>()
-        val flag = AtomicBoolean(now)
-        val request = MkvSubtitles.SnapshotRequest(flag) { calls += it }
-    }
+    // -------------------------------------------------- cues-so-far publication
 
     @Test
-    fun `nudge set before any cue emits an empty snapshot`() {
-        val data = mkv(
-            header, tracks,
-            element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "only")),
-        )
-        val probe = SnapProbe(now = true)
-        val full = MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8", snapshot = probe.request)
-        assertEquals(listOf(emptyList<SubtitleConverter.Cue>()), probe.calls)
-        assertEquals(listOf("only"), full.map { it.text })
-    }
-
-    @Test
-    fun `nudge mid-scan emits the cues collected so far, once`() {
-        // Seekable file without a usable index: the indexed attempt bails and
-        // the scan runs with fileSize-driven progress we use as the trigger.
+    fun `scan path publishes all cues collected so far after each cluster`() {
         val data = mkv(
             header, tracks,
             element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "one")),
             element(0x1F43B675, uint(0xE7, 40_000), blockGroup(2, 0, 1000, "two")),
         )
-        val probe = SnapProbe()
-        var progressCalls = 0
-        val full = FileInputStream(tempMkv(data)).use {
-            MkvSubtitles.extract(
-                it, 2, "S_TEXT/UTF8",
-                onProgress = { if (++progressCalls == 2) probe.flag.set(true) },
-                snapshot = probe.request,
-            )
-        }
-        assertEquals(listOf(listOf("one")), probe.calls.map { call -> call.map { it.text } })
+        val published = mutableListOf<List<SubtitleConverter.Cue>>()
+        val full = MkvSubtitles.extract(
+            ByteArrayInputStream(data), 2, "S_TEXT/UTF8",
+            onCues = { published += it },
+        )
+        // Each publication is a fresh complete prefix — the first stays intact
+        // after later clusters, so a consumer can hold any of them.
+        assertEquals(listOf(listOf("one"), listOf("one", "two")), published.map { call -> call.map { it.text } })
         assertEquals(listOf("one", "two"), full.map { it.text })
     }
 
     @Test
-    fun `nudge mid-indexed-path emits the cues collected so far`() {
+    fun `indexed path publishes all cues collected so far after each entry`() {
         val timestamp = uint(0xE7, 0)
         val decoy = simpleBlock(1, 0, "video decoy — absent proves the index route ran")
         val first = blockGroup(2, 500, 1000, "early")
@@ -362,26 +339,14 @@ class MkvSubtitlesTest {
             cuePoint(500, 2, clusterPos, relFirst, durationMs = null),
             cuePoint(5000, 2, clusterPos, relSecond, durationMs = null),
         )
-        val probe = SnapProbe()
-        val full = FileInputStream(tempMkv(mkv(seekHeadToCues(cuesPos), header, tracks, cluster, cues))).use {
-            MkvSubtitles.extract(
-                it, 2, "S_TEXT/UTF8",
-                onProgress = { probe.flag.set(true) }, // set at the first entry: emit at the second
-                snapshot = probe.request,
-            )
+        val published = mutableListOf<List<SubtitleConverter.Cue>>()
+        val full = FileInputStream(tempMkv(mkv(seekHeadToCues(cuesPos), header, tracks, cluster, cues))).use { stream ->
+            MkvSubtitles.extract(stream, 2, "S_TEXT/UTF8", onCues = { published += it })
         }
-        assertEquals(listOf(listOf("early")), probe.calls.map { call -> call.map { it.text } })
-        assertEquals(listOf("early", "late"), full.map { it.text })
-    }
-
-    @Test
-    fun `no nudge means no snapshot`() {
-        val data = mkv(
-            header, tracks,
-            element(0x1F43B675, uint(0xE7, 0), blockGroup(2, 0, 1000, "one")),
+        assertEquals(
+            listOf(listOf("early"), listOf("early", "late")),
+            published.map { call -> call.map { it.text } },
         )
-        val probe = SnapProbe()
-        MkvSubtitles.extract(ByteArrayInputStream(data), 2, "S_TEXT/UTF8", snapshot = probe.request)
-        assertTrue(probe.calls.isEmpty())
+        assertEquals(listOf("early", "late"), full.map { it.text })
     }
 }
