@@ -14,7 +14,6 @@ import androidx.core.content.ContextCompat
 import com.newash.videocast.App
 import com.newash.videocast.MainActivity
 import com.newash.videocast.R
-import java.io.IOException
 
 /**
  * Foreground service that keeps the HTTP server (and the Wi-Fi radio) alive
@@ -53,25 +52,14 @@ class StreamingService : Service() {
         ServiceCompat.startForeground(
             this, NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
         )
-
-        try {
-            ServerHolder.ensureStarted(applicationContext)
-        } catch (_: IOException) {
-            // No ports available — the ViewModel surfaces its own error; don't crash.
-            stopSelf()
-            return START_NOT_STICKY
-        }
         wifiLock.acquire()
         wakeLock.acquire()
         // Not sticky: after process death the ViewModel state (and thus the served
-        // video) is gone, so a restarted service would back a 404-only server.
+        // video) is gone, so there would be nothing left to keep alive for.
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        // Locks only — the server is stopped by whoever sent the stop intent.
-        // Stopping it here would let a stop-then-play race kill the server the
-        // new cast just started.
         wifiLock.release()
         wakeLock.release()
         super.onDestroy()

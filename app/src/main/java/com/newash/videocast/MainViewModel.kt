@@ -12,7 +12,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.newash.videocast.cast.CastPlayer
 import com.newash.videocast.server.MediaServer
-import com.newash.videocast.server.ServerHolder
 import com.newash.videocast.server.StreamingService
 import com.newash.videocast.subs.EmbeddedSubtitles
 import com.newash.videocast.subs.LanguageTag
@@ -34,6 +33,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicReference
 
 data class VideoFile(val uri: Uri, val name: String, val sizeBytes: Long, val mime: String)
@@ -116,6 +116,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private val openSubtitles = OpenSubtitlesClient(BuildConfig.OPENSUBTITLES_API_KEY)
+
+    /**
+     * The LAN server, owned solely by the ViewModel: started (synchronously,
+     * before the load request needs its URL) at cast, stopped at session end.
+     * One owner means the stop-then-play races the old process-wide holder
+     * defended against cannot happen. Volatile: started on IO, read on Main.
+     */
+    @Volatile
+    private var server: MediaServer? = null
+
+    /** Call on IO (socket bind). Tries a few ports: 8394 may linger in TIME_WAIT. */
+    @Synchronized
+    private fun ensureServer(): MediaServer = server ?: run {
+        var lastError: IOException? = null
+        (MediaServer.DEFAULT_PORT until MediaServer.DEFAULT_PORT + 10)
+            .firstNotNullOfOrNull { port ->
+                try {
+                    MediaServer(app, port).also(MediaServer::start)
+                } catch (e: IOException) {
+                    lastError = e
+                    null
+                }
+            }?.also { server = it } ?: throw (lastError ?: IOException("could not start media server"))
+    }
 
     private var searchJob: Job? = null
     private var probeJob: Job? = null
@@ -427,7 +451,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun applySubtitle(track: SubtitleTrack?) {
-        ServerHolder.server?.subtitleVtt = track?.vtt
+        server?.subtitleVtt = track?.vtt
         // No status message: arrivals re-cast automatically; only clearing
         // mid-cast leaves the button as the manual re-cast affordance.
         // The folder hint survives on purpose: a grant upgrades future auto-picks.
@@ -499,12 +523,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val prefixVtt = _state.value
                     .takeIf { it.video?.uri == video.uri && it.subtitle == null && it.extraction != null }
                     ?.let { awaitPrefixVtt() }
-                // The service starts before the server so it owns it through any
-                // bail; the server resolves after the gate, because a Stop during
-                // the gate kills whatever instance was running before it.
+                // The server resolves after the gate: a Stop during the gate
+                // kills whatever instance was running before it.
                 StreamingService.start(app)
                 val (ip, server) = withContext(Dispatchers.IO) {
-                    (localIpv4() ?: error("No Wi-Fi/LAN address found")) to ServerHolder.ensureStarted(app)
+                    (localIpv4() ?: error("No Wi-Fi/LAN address found")) to ensureServer()
                 }
                 // Re-read after the last suspension: the acquisition may just have
                 // finished, or a new pick may have replaced the video.
@@ -608,14 +631,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(loading = false, castVideo = null, castSubtitle = null) }
     }
 
-    /**
-     * The server stops here — with the intent — not in the service's onDestroy:
-     * a stop-then-play race must never let the dying service kill the server
-     * the new cast just started.
-     */
     private fun stopStreaming() {
         StreamingService.stop(app)
-        ServerHolder.stop()
+        server?.stop()
+        server = null
     }
 
     private companion object {
