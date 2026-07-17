@@ -21,7 +21,10 @@ object LanguageTag {
             3 -> ISO3_TO_ISO1[language] ?: BIBLIOGRAPHIC[language] ?: language // honest beats wrong
             else -> return null
         }
-        val region = parts.getOrNull(1)?.takeIf { it.length == 2 && it.all(Char::isLetter) }
+        // A region only stays when it says something the language doesn't:
+        // "pt-br" is meaningful, "hu-hu" is container noise.
+        val region = parts.getOrNull(1)
+            ?.takeIf { it.length == 2 && it.all(Char::isLetter) && it != primary }
         return listOfNotNull(primary, region).joinToString("-")
     }
 

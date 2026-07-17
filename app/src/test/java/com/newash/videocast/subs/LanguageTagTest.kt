@@ -16,6 +16,7 @@ class LanguageTagTest {
         assertEquals("de", LanguageTag.normalize("deu")) // terminological
         assertEquals("en", LanguageTag.normalize("EN"))
         assertEquals("pt-br", LanguageTag.normalize("pt-BR"))
+        assertEquals("hu", LanguageTag.normalize("hu-HU")) // redundant region is container noise
     }
 
     @Test
