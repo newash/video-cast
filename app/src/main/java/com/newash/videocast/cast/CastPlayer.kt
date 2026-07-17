@@ -68,12 +68,21 @@ class CastPlayer(
     fun release() =
         castContext.sessionManager.removeSessionManagerListener(sessionListener, CastSession::class.java)
 
+    /**
+     * Loads the video. The track list is immutable after load (a Cast SDK rule),
+     * so a subtitle track is declared whenever [subtitleUrl] is given, even when
+     * the VTT is still being extracted — [subtitleActive] then stays false and
+     * [activateSubtitles] flips it on once the file is ready (the progressive
+     * path fetches the sidecar at first activation).
+     */
     fun load(
         videoUrl: String,
         mime: String,
         title: String,
         subtitleUrl: String?,
         subtitleLanguage: String,
+        subtitleActive: Boolean = subtitleUrl != null,
+        startPositionMs: Long = 0,
         onResult: (error: String?) -> Unit,
     ) {
         val client = checkNotNull(remote) { "No Chromecast session" }
@@ -100,9 +109,10 @@ class CastPlayer(
         val request = MediaLoadRequestData.Builder()
             .setMediaInfo(mediaInfo)
             .setAutoplay(true)
-            // Activating the track in the load request is far more reliable
+            .setCurrentTime(startPositionMs)
+            // Activating a ready track in the load request is far more reliable
             // than toggling it afterwards on the default receiver.
-            .setActiveTrackIds(if (subtitleUrl != null) longArrayOf(SUBTITLE_TRACK_ID) else longArrayOf())
+            .setActiveTrackIds(if (subtitleActive && subtitleUrl != null) longArrayOf(SUBTITLE_TRACK_ID) else longArrayOf())
             .build()
         // Receiver-side rejections must not be silent: surface the result.
         client.load(request).setResultCallback { result ->
@@ -111,6 +121,11 @@ class CastPlayer(
                 else result.status.statusMessage ?: "receiver rejected the load (${result.status.statusCode})"
             )
         }
+    }
+
+    /** Activates the declared-but-inactive subtitle track on the running media. */
+    fun activateSubtitles() {
+        remote?.setActiveMediaTracks(longArrayOf(SUBTITLE_TRACK_ID))
     }
 
     fun togglePlayPause() {

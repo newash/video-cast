@@ -63,8 +63,8 @@ class JlhttpContractTest {
         file.delete()
     }
 
-    private fun request(rangeHeader: String? = null, method: String = "GET"): HttpURLConnection =
-        (URL("http://127.0.0.1:$port/video").openConnection() as HttpURLConnection).apply {
+    private fun request(rangeHeader: String? = null, method: String = "GET", query: String = ""): HttpURLConnection =
+        (URL("http://127.0.0.1:$port/video$query").openConnection() as HttpURLConnection).apply {
             requestMethod = method
             rangeHeader?.let { setRequestProperty("Range", it) }
             setRequestProperty("Connection", "close") // no keep-alive reuse across per-test server restarts
@@ -123,5 +123,12 @@ class JlhttpContractTest {
         assertEquals(200, responseCode)
         assertEquals("1000", getHeaderField("Content-Length"))
         assertEquals(-1, inputStream.read())
+    }
+
+    @Test
+    fun `query strings do not affect context routing`() = request(query = "?v=3").run {
+        // The subtitle URL carries a cache-busting ?v=N; routing must ignore it.
+        assertEquals(200, responseCode)
+        assertEquals("1000", getHeaderField("Content-Length"))
     }
 }

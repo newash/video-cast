@@ -118,6 +118,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** The extraction's open stream — closed from outside to abort a blocked read. */
     private val extractionStream = AtomicReference<AutoCloseable?>()
 
+    /** Bumped per subtitle change: a fresh ?v= makes the receiver re-fetch on reload. */
+    private var vttVersion = 0
+
+    /** The running cast declared a subtitle track it hasn't activated (VTT was pending). */
+    private var castHasInactiveTrack = false
+
     private val prefs get() = app.getSharedPreferences("videocast", Context.MODE_PRIVATE)
 
     /** One remembered subtitle language, shared by OpenSubtitles search and auto-select. */
@@ -294,9 +300,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     track.language?.let { rememberedLanguages = it }
                     // Only apply to the still-current video (picks can race the extraction).
                     if (_state.value.video?.uri == video.uri) {
-                        applySubtitle(
+                        val subtitle =
                             SubtitleTrack(track.plainLabel, vtt, track.language, SubtitleSource.EMBEDDED, auto)
-                        )
+                        applySubtitle(subtitle)
+                        // Late finish during playback: put the cues on the TV now.
+                        attachSubtitleToCast(subtitle)
                     }
                 }
             } finally {
@@ -406,7 +414,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // ------------------------------------------------------------------ cast
 
-    fun startCasting() {
+    fun startCasting() = startCasting(resumeAtMs = 0)
+
+    /**
+     * Casting never waits for a running extraction: the subtitle track is
+     * declared at load (the track list is immutable afterwards) over a
+     * valid-but-empty VTT, and [attachSubtitleToCast] fills it in when the
+     * extraction lands.
+     */
+    private fun startCasting(resumeAtMs: Long) {
         val current = _state.value
         val video = current.video ?: return
         if (video.sizeBytes <= 0) return
@@ -420,18 +436,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 StreamingService.start(app)
                 server.video = MediaServer.Video(video.uri, video.mime, video.sizeBytes)
-                server.subtitleVtt = current.subtitle?.vtt
+                val subtitlePending = current.subtitle == null && current.extraction != null
+                server.subtitleVtt = current.subtitle?.vtt ?: MediaServer.EMPTY_VTT.takeIf { subtitlePending }
                 val base = "http://$ip:${server.port}"
+                vttVersion++
+                castHasInactiveTrack = subtitlePending
                 player.load(
                     videoUrl = base + MediaServer.VIDEO_PATH,
                     mime = video.mime,
                     title = video.name,
-                    subtitleUrl = current.subtitle?.let { base + MediaServer.SUBTITLE_PATH },
+                    subtitleUrl = (base + MediaServer.SUBTITLE_PATH + "?v=$vttVersion")
+                        .takeIf { current.subtitle != null || subtitlePending },
                     subtitleLanguage = current.subtitle?.language ?: rememberedLanguageTag,
+                    subtitleActive = current.subtitle != null,
+                    startPositionMs = resumeAtMs,
                     onResult = ::onLoadResult,
                 )
                 _state.update { it.copy(castSubtitle = current.subtitle?.name) }
             }
+        }
+    }
+
+    /**
+     * A subtitle arrived while the cast is running. If the load declared a
+     * still-inactive track, activation makes the receiver fetch the now-complete
+     * VTT with no playback interruption; otherwise reload at the current
+     * position (one short hiccup) with a fresh track URL.
+     */
+    private fun attachSubtitleToCast(track: SubtitleTrack) {
+        val cast = _state.value.cast
+        if (!cast.hasMedia) return
+        val player = castPlayer ?: return
+        if (castHasInactiveTrack) {
+            castHasInactiveTrack = false
+            player.activateSubtitles()
+            _state.update { it.copy(castSubtitle = track.name) }
+        } else {
+            startCasting(resumeAtMs = cast.positionMs)
         }
     }
 

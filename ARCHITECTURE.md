@@ -181,9 +181,23 @@ Candidates considered:
   rule 3 needs nothing. Sibling matching itself is a pure function
   (`SiblingSubtitles.bestMatch`) with unit tests.
 - **Casting the track**: `MediaTrack(id=1, TYPE_TEXT, SUBTYPE_SUBTITLES,
-  contentId=http://…/subs.vtt, contentType=text/vtt)` attached to
-  `MediaInfo`, activated via `setActiveTrackIds([1])` on the load request —
-  activating at load time is far more reliable than toggling after.
+  contentId=http://…/subs.vtt?v=N, contentType=text/vtt)` attached to
+  `MediaInfo`; a ready track is activated via `setActiveTrackIds([1])` on
+  the load request — activating at load time is far more reliable than
+  toggling after.
+- **Casting never waits for extraction.** The Cast track list is immutable
+  after load, so when an embedded extraction is still running the load
+  declares the track anyway over a valid-but-empty VTT (`WEBVTT\n\n`,
+  `Cache-Control: no-store`) and leaves it inactive. When the extraction
+  finishes mid-playback, `setActiveMediaTracks` flips it on — the
+  progressive path fetches the sidecar at first activation, so the full
+  cue set appears with no interruption. If the track was already active
+  (subtitle replaced mid-cast), the app reloads at the current position
+  with a bumped `?v=` instead — one short hiccup. The extraction's
+  sequential read overlaps rclone's VFS cache of the cast stream, so
+  network cost stays ~1× the file; a tee inside the server was evaluated
+  and rejected (cues would trail the playhead and the cache already
+  deduplicates the bytes).
 
 ### Surviving screen-off
 

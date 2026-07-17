@@ -65,6 +65,9 @@ class MediaServer(private val context: Context, val port: Int) {
     private fun serveSubtitles(req: HTTPServer.Request, resp: HTTPServer.Response): Int {
         val bytes = (subtitleVtt ?: return 404).toByteArray(Charsets.UTF_8)
         val length = bytes.size.toLong()
+        // no-store: the VTT can be replaced mid-session (late-finished extraction);
+        // a cached copy on the receiver would pin the stale cues.
+        resp.headers.add("Cache-Control", "no-store")
         resp.sendHeaders(200, length, -1, null, "text/vtt; charset=utf-8", null)
         resp.sendBody(bytes.inputStream(), length, null)
         return 0
@@ -127,6 +130,9 @@ class MediaServer(private val context: Context, val port: Int) {
         const val VIDEO_PATH = "/video"
         const val SUBTITLE_PATH = "/subs.vtt"
         const val DEFAULT_PORT = 8394
+
+        /** Valid-but-empty sidecar: served while an extraction is still producing the real one. */
+        const val EMPTY_VTT = "WEBVTT\n\n"
 
         // Generous: the Chromecast holds connections open while buffering.
         private const val SOCKET_TIMEOUT_MS = 30_000
