@@ -85,6 +85,11 @@ class CastPlayer(
         startPositionMs: Long = 0,
     ): String? {
         val client = checkNotNull(remote) { "No Chromecast session" }
+        // Deactivate the playing item's text track before replacing it: the
+        // default receiver can otherwise leave its last cue stuck on screen,
+        // rendering under the new load's subtitles. (Deactivation on a live
+        // item is reliable; it's activation after load that isn't.)
+        if (client.hasMediaSession()) client.setActiveMediaTracks(longArrayOf())
         val metadata = MediaMetadata(MediaMetadata.MEDIA_TYPE_MOVIE).apply {
             putString(MediaMetadata.KEY_TITLE, title)
         }
@@ -144,7 +149,10 @@ class CastPlayer(
     }
 
     fun stop() {
-        remote?.stop()
+        val client = remote ?: return
+        // Same stuck-cue defense as in load: clear captions before unloading.
+        if (client.hasMediaSession()) client.setActiveMediaTracks(longArrayOf())
+        client.stop()
     }
 
     fun progress(): Progress {

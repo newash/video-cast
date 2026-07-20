@@ -565,9 +565,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // null → the subtitle route serves a valid empty VTT by itself.
                 server.subtitleVtt = current.subtitle?.vtt ?: prefixVtt
                 val base = "http://$ip:${server.port}"
+                // Both URLs carry the version: a reload whose contentId matches the
+                // playing item's makes the receiver skip caption teardown — the old
+                // track's last cue stays stuck on screen under the new track.
                 vttVersion++
                 val error = player.load(
-                    videoUrl = base + MediaServer.VIDEO_PATH,
+                    videoUrl = base + MediaServer.VIDEO_PATH + "?v=$vttVersion",
                     mime = video.mime,
                     title = video.name,
                     subtitleUrl = (base + MediaServer.SUBTITLE_PATH + "?v=$vttVersion")

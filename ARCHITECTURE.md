@@ -213,9 +213,13 @@ once and the track list is immutable after load. The resolution:
   active track — no waiting at all. Near-instant start, subtitles from
   0:00, even while the extractor sits in a blocked network read.
 - When the extraction completes mid-playback, the app reloads at the live
-  position with a bumped `?v=` track URL — one short hiccup, then the
-  complete cue set. The same reload path serves any subtitle picked or
-  downloaded mid-play.
+  position with a bumped `?v=` on *both* URLs — one short hiccup, then the
+  complete cue set. The video URL must change too: a reload whose contentId
+  matches the playing item's makes the receiver skip caption teardown,
+  leaving the old track's last cue stuck on screen under the new one (the
+  sender also deactivates the live item's text track before any load or
+  stop, as a second line of defense). The same reload path serves any
+  subtitle picked or downloaded mid-play.
 
 The extraction's sequential read overlaps the rclone VFS cache of the cast
 stream, so network cost stays ~1× the file. Evaluated and rejected: a tee
