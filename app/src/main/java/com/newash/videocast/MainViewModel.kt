@@ -182,6 +182,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Bumped per subtitle change: a fresh ?v= makes the receiver re-fetch on reload. */
     private var vttVersion = 0
 
+    /**
+     * The user's volume, shown instead of the SDK's cached device volume,
+     * which lags (or with some TV/CEC setups never reflects) our own set
+     * command — the poll would snap the slider back to a stale reading.
+     * Cleared when the receiver itself reports movement (TV-side change).
+     */
+    private var userVolume: Float? = null
+    private var polledVolume = 0f
+
     private val prefs get() = app.getSharedPreferences("videocast", Context.MODE_PRIVATE)
 
     /** One remembered subtitle language, shared by OpenSubtitles search and auto-select. */
@@ -207,9 +216,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             while (isActive) {
                 if (_state.subscriptionCount.value > 0) {
                     runCatching(player::progress).onSuccess { p ->
+                        if (p.volume != polledVolume) userVolume = null // receiver moved: adopt it
+                        polledVolume = p.volume
                         // loading clears when the load's verdict lands — old media
                         // lingering through a re-cast must not re-enable Play mid-load.
-                        _state.update { it.copy(cast = p) }
+                        _state.update { it.copy(cast = p.copy(volume = userVolume ?: p.volume)) }
                     }
                 }
                 delay(500)
@@ -628,7 +639,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setVolume(fraction: Float) {
-        castPlayer?.setVolume(fraction)
+        castPlayer?.setVolume(fraction) ?: return
+        userVolume = fraction
+        _state.update { it.copy(cast = it.cast.copy(volume = fraction)) }
     }
 
     fun stopCasting() {
